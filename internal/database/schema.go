@@ -108,17 +108,20 @@ type Message struct {
 	Data       MessageInfo `json:"data"` // JSON
 }
 
-// MessageInfo represents message metadata (InfoData in TS)
+// MessageInfo represents message metadata (matches actual database schema)
 type MessageInfo struct {
-	Role      string `json:"role"`       // user, assistant
-	Content   string `json:"content"`    // Optional for assistant
-	Prompt    string `json:"prompt"`     // Optional
-	Model     string `json:"model"`      // Optional
-	Provider  string `json:"provider"`   // Optional
-	Cost      int64  `json:"cost"`       // Optional
-	Tokens    int    `json:"tokens"`     // Optional
-	TimeStart int64  `json:"time_start"` // Optional
-	TimeEnd   int64  `json:"time_end"`   // Optional
+	Role       string                 `json:"role"`       // user, assistant
+	ParentID   string                 `json:"parentID"`   // Optional
+	Agent      string                 `json:"agent"`      // Optional
+	Mode       string                 `json:"mode"`       // Optional (build, etc.)
+	ModelID    string                 `json:"modelID"`    // Optional
+	ProviderID string                 `json:"providerID"` // Optional
+	Cost       int64                  `json:"cost"`       // Optional
+	Tokens     map[string]interface{} `json:"tokens"`     // Optional object (total, input, output, etc.)
+	Time       map[string]interface{} `json:"time"`       // Optional object with created/completed
+	Finish     string                 `json:"finish"`     // Optional (tool-calls, end, etc.)
+	Path       map[string]interface{} `json:"path"`       // Optional object with cwd/root
+	Summary    map[string]interface{} `json:"summary"`    // Optional
 }
 
 // ===========================================
@@ -134,16 +137,21 @@ type Part struct {
 	Data       PartData   `json:"data"` // JSON
 }
 
-// PartData represents part content (PartData in TS)
+// PartData represents part content (matches actual database schema)
 type PartData struct {
-	Type    string         `json:"type"`    // text, tool_use, tool_result, etc.
-	Text    string         `json:"text"`    // For text parts
-	ToolID  string         `json:"toolID"`  // For tool parts
-	ToolName string        `json:"toolName"` // For tool parts
-	ToolInput map[string]any `json:"toolInput"` // For tool_use
-	ToolResult string      `json:"toolResult"` // For tool_result
-	Status  string         `json:"status"`  // pending, running, success, error
-	Error   string         `json:"error"`   // For error status
+	Type      string                 `json:"type"`      // text, file, tool_use, tool_result, step-start, thinking
+	Text      string                 `json:"text"`      // For text parts
+	Synthetic bool                   `json:"synthetic"` // Optional flag for synthetic parts
+	Mime      string                 `json:"mime"`      // For file parts
+	Filename  string                 `json:"filename"`  // For file parts
+	URL       string                 `json:"url"`       // For file parts
+	Source    map[string]interface{} `json:"source"`    // For file parts
+	ToolID    string                 `json:"toolID"`    // For tool parts
+	ToolName  string                 `json:"toolName"`  // For tool parts
+	ToolInput map[string]any         `json:"toolInput"` // For tool_use
+	ToolResult string                `json:"toolResult"` // For tool_result
+	Status    string                 `json:"status"`    // pending, running, success, error
+	Error     string                 `json:"error"`     // For error status
 }
 
 // ===========================================

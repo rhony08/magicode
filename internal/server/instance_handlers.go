@@ -242,7 +242,8 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 			"id":         msg.ID,
 			"session_id": msg.SessionID,
 			"role":       msg.Data.Role,
-			"content":    msg.Data.Content,
+			"model":      msg.Data.ModelID,
+			"provider":   msg.Data.ProviderID,
 			"created_at": msg.Timestamps.TimeCreated,
 		}
 	}
@@ -276,12 +277,12 @@ func (s *Server) handleAddMessage(c *fiber.Ctx) error {
 
 	ctx := context.Background()
 	msgStorage := database.NewMessageStorage(s.services.DB)
+	partStorage := database.NewPartStorage(s.services.DB)
 
 	msg := database.Message{
 		SessionID: id,
 		Data: database.MessageInfo{
-			Role:    req.Role,
-			Content: req.Content,
+			Role: req.Role,
 		},
 	}
 
@@ -290,11 +291,28 @@ func (s *Server) handleAddMessage(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	// Create a part for the message content
+	if req.Content != "" {
+		part := database.Part{
+			MessageID: created.ID,
+			SessionID: id,
+			Data: database.PartData{
+				Type: "text",
+				Text: req.Content,
+			},
+		}
+		_, err = partStorage.Create(ctx, part)
+		if err != nil {
+			// Log warning but don't fail
+		}
+	}
+
 	return c.JSON(fiber.Map{
 		"id":         created.ID,
 		"session_id": created.SessionID,
 		"role":       created.Data.Role,
-		"content":    created.Data.Content,
+		"model":      created.Data.ModelID,
+		"provider":   created.Data.ProviderID,
 		"created_at": created.Timestamps.TimeCreated,
 	})
 }

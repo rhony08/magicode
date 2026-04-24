@@ -168,9 +168,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			directory = session.Directory
 		}
 
-		log.Info("Continuing session: %s", sessionID)
-		log.Info("Directory: %s", directory)
-		log.Info("Title: %s", session.Title)
+		log.Info("Continuing session", "sessionID", sessionID)
+		log.Info("Directory", "path", directory)
+		log.Info("Title", "title", session.Title)
 
 		// Load messages from database
 		messageStorage := database.NewMessageStorage(db)
@@ -178,19 +178,26 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 		dbMessages, err := messageStorage.List(ctx, sessionID)
 		if err != nil {
-			log.Warn("Failed to load messages: %v", err)
+			log.Warn("Failed to load messages", "error", err.Error())
 		} else {
-			log.Info("Loaded %d messages from session", len(dbMessages))
+			log.Info("Loaded messages from session", "count", len(dbMessages))
 
 			// Convert database messages to TUI messages
 			for _, dbMsg := range dbMessages {
 				tuiMsg := convertDBMessageToTUI(dbMsg)
 
-				// Load parts for assistant messages
-				if dbMsg.Data.Role == "assistant" {
-					parts, err := partStorage.ListByMessage(ctx, dbMsg.ID)
-					if err == nil && len(parts) > 0 {
-						tuiMsg.Parts = convertPartsToTUI(parts)
+				// Load parts for ALL messages (user and assistant)
+				parts, err := partStorage.ListByMessage(ctx, dbMsg.ID)
+				if err == nil && len(parts) > 0 {
+					tuiMsg.Parts = convertPartsToTUI(parts)
+					// For user messages, extract text from parts if available
+					if dbMsg.Data.Role == "user" {
+						for _, part := range parts {
+							if part.Data.Type == "text" && part.Data.Text != "" {
+								tuiMsg.Content = part.Data.Text
+								break
+							}
+						}
 					}
 				}
 
@@ -265,6 +272,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 }
 
 // convertDBMessageToTUI converts a database message to a TUI message
+// Note: Content is stored in parts, not in message.data
 func convertDBMessageToTUI(dbMsg database.Message) tui.Message {
 	role := tui.RoleUser
 	if dbMsg.Data.Role == "assistant" {
@@ -273,13 +281,35 @@ func convertDBMessageToTUI(dbMsg database.Message) tui.Message {
 		role = tui.RoleSystem
 	}
 
+	// Extract timestamp from data.time.created if available, otherwise use message timestamp
+	var timestamp time.Time
+	if dbMsg.Data.Time != nil {
+		if created, ok := dbMsg.Data.Time["created"]; ok {
+			// Handle different numeric types from JSON
+			switch v := created.(type) {
+			case float64:
+				timestamp = time.UnixMilli(int64(v))
+			case int64:
+				timestamp = time.UnixMilli(v)
+			case int:
+				timestamp = time.UnixMilli(int64(v))
+			default:
+				timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+			}
+		} else {
+			timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+		}
+	} else {
+		timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+	}
+
 	return tui.Message{
 		ID:        dbMsg.ID,
 		Role:      role,
-		Content:   dbMsg.Data.Content,
-		Timestamp: time.UnixMilli(dbMsg.Timestamps.TimeCreated),
-		Model:     dbMsg.Data.Model,
-		Provider:  dbMsg.Data.Provider,
+		Content:   "", // Content is in parts, not here
+		Timestamp: timestamp,
+		Model:     dbMsg.Data.ModelID,
+		Provider:  dbMsg.Data.ProviderID,
 	}
 }
 
@@ -292,6 +322,11 @@ func convertPartsToTUI(parts []database.Part) []tui.Part {
 			Type:   p.Data.Type,
 			Text:   p.Data.Text,
 			Status: p.Data.Status,
+		}
+
+		// Handle file parts
+		if p.Data.Type == "file" {
+			tuiPart.Text = fmt.Sprintf("[File: %s]", p.Data.Filename)
 		}
 
 		// Handle tool parts
