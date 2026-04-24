@@ -1,11 +1,13 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/rhony08/magicode/internal/config"
+	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/global"
 	"github.com/rhony08/magicode/internal/tui"
 	"github.com/rhony08/magicode/internal/util/log"
@@ -32,7 +34,11 @@ Path Configuration:
   - Cache:  ~/.cache/magicode        (cache)
 
   You can override these paths with flags or config file.
-  For backward compatibility with OpenCode, use --use-opencode flag.`,
+  For backward compatibility with OpenCode, use --use-opencode flag.
+
+Session Continuation:
+  Use --session <id> to continue an existing session.
+  Use 'magicode session list --all' to see all session IDs.`,
 		Version: version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Check for backward compatibility first
@@ -83,6 +89,9 @@ Path Configuration:
 	rootCmd.PersistentFlags().StringP("directory", "d", "", "working directory (default: current directory)")
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file path")
 
+	// Session flag for continuing existing session
+	rootCmd.PersistentFlags().StringP("session", "s", "", "continue existing session by ID")
+
 	// Path configuration flags
 	rootCmd.PersistentFlags().String("data-dir", "", "custom data directory (database, sessions)")
 	rootCmd.PersistentFlags().String("config-dir", "", "custom config directory")
@@ -98,6 +107,7 @@ Path Configuration:
 	viper.BindPFlag("pure", rootCmd.PersistentFlags().Lookup("pure"))
 	viper.BindPFlag("directory", rootCmd.PersistentFlags().Lookup("directory"))
 	viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
+	viper.BindPFlag("session", rootCmd.PersistentFlags().Lookup("session"))
 	viper.BindPFlag("data-dir", rootCmd.PersistentFlags().Lookup("data-dir"))
 	viper.BindPFlag("config-dir", rootCmd.PersistentFlags().Lookup("config-dir"))
 	viper.BindPFlag("state-dir", rootCmd.PersistentFlags().Lookup("state-dir"))
@@ -127,6 +137,34 @@ Path Configuration:
 // runTUI starts the interactive terminal UI
 func runTUI(cmd *cobra.Command, args []string) error {
 	directory := viper.GetString("directory")
+	sessionID := viper.GetString("session")
+
+	// If session ID provided, load it to get the directory
+	if sessionID != "" {
+		ctx := context.Background()
+		dbPath := global.DatabasePath()
+		db, err := database.New(ctx, database.Config{Path: dbPath})
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		defer db.Close()
+
+		sessionStorage := database.NewSessionStorage(db)
+		session, err := sessionStorage.Get(ctx, sessionID)
+		if err != nil {
+			return fmt.Errorf("session not found: %s\n\nUse 'magicode session list --all --use-opencode' to see available sessions", sessionID)
+		}
+
+		// Use session's directory if not specified
+		if directory == "" {
+			directory = session.Directory
+		}
+
+		log.Info("Continuing session: %s", sessionID)
+		log.Info("Directory: %s", directory)
+		log.Info("Title: %s", session.Title)
+	}
+
 	if directory == "" {
 		var err error
 		directory, err = os.Getwd()
@@ -154,6 +192,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	appName := global.GetAppName()
 	tuiConfig := tui.Config{
 		Title: fmt.Sprintf("%s - %s", appName, cfg.Model()),
+	}
+
+	// If continuing a session, pass it to TUI
+	if sessionID != "" {
+		// TODO: Load session messages and pass to TUI
+		// For now, just pass the session ID for reference
+		tuiConfig.Session = tui.Session{
+			ID:    sessionID,
+			Title: "Continued Session",
+		}
 	}
 
 	// Create the TUI app
