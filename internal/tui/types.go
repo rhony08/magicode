@@ -84,6 +84,25 @@ var (
 	styleHelp = lipgloss.NewStyle().
 			Foreground(colorTextMuted).
 			Padding(0, 1)
+
+	// New styles for message parts
+	styleToolUse = lipgloss.NewStyle().
+			Foreground(colorInfo).
+			Bold(true).
+			Padding(0, 1)
+
+	styleToolResult = lipgloss.NewStyle().
+			Foreground(colorSuccess).
+			Padding(0, 1)
+
+	styleThinking = lipgloss.NewStyle().
+			Foreground(colorTextMuted).
+			Italic(true).
+			Padding(0, 1)
+
+	styleTimestamp = lipgloss.NewStyle().
+			Foreground(colorTextMuted).
+			Padding(0, 1)
 )
 
 // Message types
@@ -150,6 +169,22 @@ type Message struct {
 	Content   string
 	Timestamp time.Time
 	ToolCall  *ToolCall
+	// Additional fields for loaded messages
+	Model     string
+	Provider  string
+	Parts     []Part  // For assistant messages with multiple parts
+}
+
+// Part represents a part of a message (for assistant responses)
+type Part struct {
+	ID         string
+	Type       string  // text, tool_use, tool_result
+	Text       string  // For text parts
+	ToolID     string  // For tool parts
+	ToolName   string  // For tool parts
+	ToolInput  string  // JSON string of input
+	ToolResult string  // For tool_result
+	Status     string  // pending, running, success, error
 }
 
 // ToolCall represents a tool call
@@ -164,6 +199,7 @@ type ToolCall struct {
 type Session struct {
 	ID        string
 	Title     string
+	Directory string
 	CreatedAt time.Time
 	Active    bool
 }
@@ -185,3 +221,14 @@ const (
 	ModeInput  InputMode = "input"
 	ModeWait   InputMode = "wait"
 )
+
+// LoadMessagesRequest is a command to load messages from database
+type LoadMessagesRequest struct {
+	SessionID string
+}
+
+// LoadMessagesResult is the result of loading messages
+type LoadMessagesResult struct {
+	Messages []Message
+	Error    error
+}

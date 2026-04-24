@@ -2,8 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/rhony08/magicode/internal/config"
@@ -138,8 +140,11 @@ Session Continuation:
 func runTUI(cmd *cobra.Command, args []string) error {
 	directory := viper.GetString("directory")
 	sessionID := viper.GetString("session")
+	var initialMessages []tui.Message
+	var sessionTitle string
+	var sessionDirectory string
 
-	// If session ID provided, load it to get the directory
+	// If session ID provided, load it to get the directory and messages
 	if sessionID != "" {
 		ctx := context.Background()
 		dbPath := global.DatabasePath()
@@ -155,6 +160,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("session not found: %s\n\nUse 'magicode session list --all --use-opencode' to see available sessions", sessionID)
 		}
 
+		sessionTitle = session.Title
+		sessionDirectory = session.Directory
+
 		// Use session's directory if not specified
 		if directory == "" {
 			directory = session.Directory
@@ -163,6 +171,32 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		log.Info("Continuing session: %s", sessionID)
 		log.Info("Directory: %s", directory)
 		log.Info("Title: %s", session.Title)
+
+		// Load messages from database
+		messageStorage := database.NewMessageStorage(db)
+		partStorage := database.NewPartStorage(db)
+
+		dbMessages, err := messageStorage.List(ctx, sessionID)
+		if err != nil {
+			log.Warn("Failed to load messages: %v", err)
+		} else {
+			log.Info("Loaded %d messages from session", len(dbMessages))
+
+			// Convert database messages to TUI messages
+			for _, dbMsg := range dbMessages {
+				tuiMsg := convertDBMessageToTUI(dbMsg)
+
+				// Load parts for assistant messages
+				if dbMsg.Data.Role == "assistant" {
+					parts, err := partStorage.ListByMessage(ctx, dbMsg.ID)
+					if err == nil && len(parts) > 0 {
+						tuiMsg.Parts = convertPartsToTUI(parts)
+					}
+				}
+
+				initialMessages = append(initialMessages, tuiMsg)
+			}
+		}
 	}
 
 	if directory == "" {
@@ -190,17 +224,25 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create TUI app configuration with title showing model info
 	appName := global.GetAppName()
+	title := fmt.Sprintf("%s - %s", appName, cfg.Model())
+	if sessionTitle != "" {
+		title = fmt.Sprintf("%s - %s", appName, sessionTitle)
+	}
+
 	tuiConfig := tui.Config{
-		Title: fmt.Sprintf("%s - %s", appName, cfg.Model()),
+		Title:           title,
+		InitialMessages: initialMessages,
+		SessionID:       sessionID,
 	}
 
 	// If continuing a session, pass it to TUI
 	if sessionID != "" {
-		// TODO: Load session messages and pass to TUI
-		// For now, just pass the session ID for reference
 		tuiConfig.Session = tui.Session{
-			ID:    sessionID,
-			Title: "Continued Session",
+			ID:        sessionID,
+			Title:     sessionTitle,
+			Directory: sessionDirectory,
+			CreatedAt: time.Now(),
+			Active:    true,
 		}
 	}
 
@@ -220,4 +262,53 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// convertDBMessageToTUI converts a database message to a TUI message
+func convertDBMessageToTUI(dbMsg database.Message) tui.Message {
+	role := tui.RoleUser
+	if dbMsg.Data.Role == "assistant" {
+		role = tui.RoleAssistant
+	} else if dbMsg.Data.Role == "system" {
+		role = tui.RoleSystem
+	}
+
+	return tui.Message{
+		ID:        dbMsg.ID,
+		Role:      role,
+		Content:   dbMsg.Data.Content,
+		Timestamp: time.UnixMilli(dbMsg.Timestamps.TimeCreated),
+		Model:     dbMsg.Data.Model,
+		Provider:  dbMsg.Data.Provider,
+	}
+}
+
+// convertPartsToTUI converts database parts to TUI parts
+func convertPartsToTUI(parts []database.Part) []tui.Part {
+	var result []tui.Part
+	for _, p := range parts {
+		tuiPart := tui.Part{
+			ID:     p.ID,
+			Type:   p.Data.Type,
+			Text:   p.Data.Text,
+			Status: p.Data.Status,
+		}
+
+		// Handle tool parts
+		if p.Data.Type == "tool_use" || p.Data.Type == "tool_result" {
+			tuiPart.ToolName = p.Data.ToolName
+			tuiPart.ToolID = p.Data.ToolID
+			if p.Data.Type == "tool_result" {
+				tuiPart.ToolResult = p.Data.ToolResult
+			}
+			if p.Data.ToolInput != nil {
+				// Convert map to JSON string for display
+				inputJSON, _ := json.Marshal(p.Data.ToolInput)
+				tuiPart.ToolInput = string(inputJSON)
+			}
+		}
+
+		result = append(result, tuiPart)
+	}
+	return result
 }

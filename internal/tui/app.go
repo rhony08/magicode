@@ -25,6 +25,7 @@ type App struct {
 	// Sessions
 	sessions    []Session
 	activeSession *Session
+	sessionID   string  // Current session ID for reference
 
 	// Messages
 	messages    []Message
@@ -55,8 +56,10 @@ type App struct {
 
 // Config represents app configuration
 type Config struct {
-	Title   string
-	Session Session
+	Title       string
+	Session     Session
+	InitialMessages []Message  // Pre-loaded messages for session continuation
+	SessionID   string        // Session ID for loading messages
 }
 
 // NewApp creates a new TUI application
@@ -95,6 +98,20 @@ func NewApp(cfg Config) *App {
 	if cfg.Session.ID != "" {
 		app.sessions = []Session{cfg.Session}
 		app.activeSession = &cfg.Session
+		app.sessionID = cfg.Session.ID
+	}
+
+	// Set session ID if provided separately
+	if cfg.SessionID != "" {
+		app.sessionID = cfg.SessionID
+	}
+
+	// Load initial messages if provided (from database)
+	if len(cfg.InitialMessages) > 0 {
+		app.messages = cfg.InitialMessages
+		app.messageViewport.SetContent(app.buildMessagesContent())
+		app.messageViewport.GotoBottom()
+		app.status = fmt.Sprintf("Loaded %d messages", len(cfg.InitialMessages))
 	}
 
 	return app
@@ -166,6 +183,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		a.setError(msg.Error)
+
+	case LoadMessagesResult:
+		if msg.Error != nil {
+			a.setError(msg.Error)
+		} else {
+			a.messages = msg.Messages
+			a.messageViewport.SetContent(a.buildMessagesContent())
+			a.messageViewport.GotoBottom()
+			if len(msg.Messages) > 0 {
+				a.status = fmt.Sprintf("Loaded %d messages", len(msg.Messages))
+			}
+		}
 
 	case TickMsg:
 		if a.showError {
@@ -305,11 +334,31 @@ func (a *App) buildMessagesContent() string {
 	for _, msg := range a.messages {
 		switch msg.Role {
 		case RoleUser:
-			lines = append(lines, styleUserMessage.Render(fmt.Sprintf("You: %s", msg.Content)))
+			// Render user message with timestamp
+			timeStr := msg.Timestamp.Format("15:04")
+			userContent := fmt.Sprintf("[%s] You: %s", timeStr, msg.Content)
+			lines = append(lines, styleUserMessage.Render(userContent))
+
 		case RoleAssistant:
-			lines = append(lines, styleAssistantMessage.Render(fmt.Sprintf("Assistant: %s", msg.Content)))
+			// Render assistant message - either simple content or parts
+			timeStr := msg.Timestamp.Format("15:04")
+
+			if len(msg.Parts) > 0 {
+				// Render with parts
+				partLines := a.renderParts(msg.Parts, msg.Model)
+				lines = append(lines, partLines)
+			} else if msg.Content != "" {
+				// Simple content
+				assistantContent := fmt.Sprintf("[%s] Assistant: %s", timeStr, msg.Content)
+				if msg.Model != "" {
+					assistantContent = fmt.Sprintf("[%s] Assistant (%s): %s", timeStr, msg.Model, msg.Content)
+				}
+				lines = append(lines, styleAssistantMessage.Render(assistantContent))
+			}
+
 		case RoleSystem:
 			lines = append(lines, styleSystemMessage.Render(msg.Content))
+
 		case RoleTool:
 			toolLine := a.renderToolCall(msg.ToolCall)
 			lines = append(lines, toolLine)
@@ -321,6 +370,65 @@ func (a *App) buildMessagesContent() string {
 	}
 
 	return strings.Join(lines, "\n\n")
+}
+
+// renderParts renders assistant message parts
+func (a *App) renderParts(parts []Part, model string) string {
+	var lines []string
+
+	header := "Assistant"
+	if model != "" {
+		header = fmt.Sprintf("Assistant (%s)", model)
+	}
+	lines = append(lines, styleAssistantMessage.Render(header))
+
+	for _, part := range parts {
+		switch part.Type {
+		case "text":
+			if part.Text != "" {
+				lines = append(lines, styleText.Render(part.Text))
+			}
+
+		case "tool_use":
+			toolLine := styleToolUse.Render(fmt.Sprintf("▶ %s", part.ToolName))
+			if part.ToolInput != "" {
+				// Truncate long input
+				input := part.ToolInput
+				if len(input) > 100 {
+					input = input[:100] + "..."
+				}
+				lines = append(lines, styleTextMuted.Render(input))
+			}
+			lines = append(lines, toolLine)
+
+		case "tool_result":
+			statusStyle := styleSuccess
+			if part.Status == "error" {
+				statusStyle = styleError
+			} else if part.Status == "pending" || part.Status == "running" {
+				statusStyle = styleStatus
+			}
+
+			toolLine := statusStyle.Render(fmt.Sprintf("✓ %s (%s)", part.ToolName, part.Status))
+			if part.ToolResult != "" {
+				// Truncate long results
+				result := part.ToolResult
+				if len(result) > 200 {
+					result = result[:200] + "..."
+				}
+				lines = append(lines, styleTextMuted.Render(result))
+			}
+			lines = append(lines, toolLine)
+
+		case "thinking":
+			// Thinking/reasoning blocks
+			if part.Text != "" {
+				lines = append(lines, styleThinking.Render(fmt.Sprintf("💭 %s", part.Text)))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // renderToolCall renders a tool call message
