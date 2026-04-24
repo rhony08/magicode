@@ -1,10 +1,10 @@
-# OpenCode CLI (Go Implementation)
+# MagiCode CLI
 
-A high-performance, memory-efficient CLI coding assistant written in Go.
+A high-performance, memory-efficient AI-powered coding assistant written in Go.
 
 ## Overview
 
-This is a Go recreation of the [OpenCode](https://github.com/opencode-ai/opencode) TypeScript CLI, focusing on:
+MagiCode is a Go recreation of the [OpenCode](https://github.com/opencode-ai/opencode) TypeScript CLI, focusing on:
 
 - **Memory efficiency**: Bounded caches, proper cleanup, explicit resource management
 - **Performance**: Compiled binary, instant startup, no runtime overhead
@@ -41,7 +41,7 @@ make deps
 make build
 ```
 
-The binary will be created in `./bin/opencode`.
+The binary will be created in `./magicode`.
 
 ### Install to system
 
@@ -53,46 +53,132 @@ make install
 
 ```bash
 # Start interactive TUI
-opencode
+magicode
 
 # Start in a specific directory
-opencode -d /path/to/project
+magicode -d /path/to/project
 
 # Run HTTP server
-opencode serve
+magicode serve
 
 # List available providers
-opencode providers
+magicode providers
 
 # List available models
-opencode models
+magicode models
 
 # Manage sessions
-opencode session list
-opencode session create
-opencode session delete <id>
+magicode session list
+magicode session create
+magicode session delete <id>
 
 # Manage configuration
-opencode config show
-opencode config set model anthropic/claude-sonnet-4-5
+magicode config show
+magicode config set model anthropic/claude-sonnet-4-5
+
+# Show path configuration
+magicode paths
 
 # Debug commands
-opencode debug version
-opencode debug paths
+magicode debug version
+magicode debug paths
 ```
+
+## Path Configuration
+
+MagiCode uses the XDG Base Directory Specification:
+
+| Type | Default Path |
+|------|--------------|
+| Data | `~/.local/share/magicode` |
+| Config | `~/.config/magicode` |
+| State | `~/.local/state/magicode` |
+| Cache | `~/.cache/magicode` |
+
+### Custom Paths
+
+Override paths with command-line flags:
+
+```bash
+# Custom data directory
+magicode --data-dir /custom/data
+
+# Custom config directory
+magicode --config-dir /custom/config
+
+# Custom database file
+magicode --database /custom/magicode.db
+
+# Custom log file
+magicode --log-file /custom/magicode.log
+```
+
+## Backward Compatibility with OpenCode
+
+MagiCode provides full backward compatibility with OpenCode. You can seamlessly switch from OpenCode to MagiCode without losing any data.
+
+### Quick Migration
+
+Use the `--use-opencode` flag to use OpenCode's paths:
+
+```bash
+# Use OpenCode paths for this session
+magicode --use-opencode
+```
+
+This will use:
+- Data: `~/.local/share/opencode`
+- Config: `~/.config/opencode`
+- State: `~/.local/state/opencode`
+- Cache: `~/.cache/opencode`
+
+### Config File Compatibility
+
+MagiCode reads both `magicode.json` and `opencode.json` config files:
+
+```bash
+# These are all valid config files:
+~/.config/magicode/magicode.json
+~/.config/magicode/magicode.jsonc
+~/.config/opencode/opencode.json    # Backward compatible
+~/.config/opencode/opencode.jsonc  # Backward compatible
+```
+
+### Aliasing for Drop-in Replacement
+
+Create an alias in your shell configuration:
+
+```bash
+# ~/.bashrc or ~/.zshrc
+alias opencode='magicode --use-opencode'
+```
+
+Or create a symlink:
+
+```bash
+# After 'make install'
+ln -s $(which magicode) /usr/local/bin/opencode
+```
+
+### Session & Database Compatibility
+
+The database schema is fully compatible with OpenCode:
+- Sessions, messages, and projects are stored identically
+- You can switch between OpenCode and MagiCode without migration
+- All your conversation history is preserved
 
 ## Configuration
 
 Configuration is stored in JSON/JSONC files:
 
-- **Global**: `~/.config/opencode/opencode.json`
-- **Project**: `<project>/.opencode/opencode.json` or `<project>/opencode.json`
+- **Global**: `~/.config/magicode/magicode.json` (or `~/.config/opencode/opencode.json`)
+- **Project**: `<project>/.magicode/magicode.json` or `<project>/magicode.json`
 
 Example configuration:
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
+  "$schema": "https://magicode.ai/config.json",
   "model": "anthropic/claude-sonnet-4-5",
   "small_model": "anthropic/claude-3-5-haiku",
   "default_agent": "build",
@@ -114,17 +200,18 @@ Example configuration:
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| CLI | `cmd/opencode/commands/` | Cobra command handlers |
+| CLI | `cmd/magicode/commands/` | Cobra command handlers |
 | Instance | `internal/instance/` | Project context with bounded cache |
 | Bus | `internal/bus/` | Channel-based pub/sub with cleanup |
 | Config | `internal/config/` | JSON/JSONC configuration |
 | Provider | `internal/provider/` | AI provider abstraction |
 | Session | `internal/session/` | Conversation management |
-| Storage | `internal/storage/` | SQLite persistence |
+| Storage | `internal/database/` | SQLite persistence |
 | LSP | `internal/lsp/` | Language server client |
 | PTY | `internal/pty/` | Terminal sessions |
 | TUI | `internal/tui/` | Bubble Tea interface |
 | Tools | `internal/tool/` | Tool implementations |
+| Server | `internal/server/` | Fiber HTTP server |
 
 ### Memory Leak Solutions
 
@@ -152,12 +239,24 @@ The Go implementation addresses all memory leaks identified in the TypeScript ve
 
 ```bash
 make test
+# or
+go test ./... -timeout 60s
 ```
 
 ### Run with coverage
 
 ```bash
 make test-coverage
+# or
+go test ./... -coverprofile=coverage.out
+```
+
+### Build
+
+```bash
+make build
+# or
+go build -o magicode ./cmd/magicode
 ```
 
 ### Lint
@@ -174,19 +273,17 @@ make fmt
 
 ## Project Status
 
-This is **Phase 1** (Core Infrastructure) of the implementation.
-
 | Phase | Status | Components |
 |-------|--------|------------|
 | 1 | ✅ Done | CLI, Logging, Global paths, Config, Instance, Bus |
-| 2 | 🚧 Pending | Storage, Session, Sync |
-| 3 | 📋 Planned | AI Providers (Anthropic, OpenAI) |
-| 4 | 📋 Planned | Tools, Agent, Permission |
-| 5 | 📋 Planned | LSP Integration |
-| 6 | 📋 Planned | TUI (Bubble Tea) |
-| 7 | 📋 Planned | PTY & Terminal |
-| 8 | 📋 Planned | HTTP Server & API |
-| 9 | 📋 Planned | Polish & Testing |
+| 2 | ✅ Done | Database, Session, Migration |
+| 3 | ✅ Done | AI Providers (Anthropic, OpenAI) |
+| 4 | ✅ Done | Tools, Permission |
+| 5 | ✅ Done | LSP Integration |
+| 6 | ✅ Done | TUI (Bubble Tea) |
+| 7 | ✅ Done | PTY & Terminal |
+| 8 | ✅ Done | HTTP Server & API |
+| 9 | 🚧 In Progress | Polish & Testing |
 
 ## License
 

@@ -22,12 +22,42 @@ func NewRootCommand(version string) *cobra.Command {
 edit, and understand code. It integrates with multiple AI providers
 and provides tools for file operations, code search, and more.
 
-Run without arguments to start the interactive TUI.`,
+Run without arguments to start the interactive TUI.
+
+Path Configuration:
+  MagiCode uses XDG Base Directory Specification for paths:
+  - Data:   ~/.local/share/magicode  (database, sessions)
+  - Config: ~/.config/magicode       (magicode.json)
+  - State:  ~/.local/state/magicode  (logs)
+  - Cache:  ~/.cache/magicode        (cache)
+
+  You can override these paths with flags or config file.
+  For backward compatibility with OpenCode, use --use-opencode flag.`,
 		Version: version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Initialize global paths
-			if err := global.Init(); err != nil {
-				return fmt.Errorf("failed to initialize: %w", err)
+			// Check for backward compatibility first
+			useOpenCode := viper.GetBool("use-opencode")
+			if useOpenCode {
+				global.SetAppName("opencode")
+			} else {
+				// Auto-detect opencode installation
+				global.BackwardCompatibility()
+			}
+
+			// Setup custom paths from flags/config
+			customPaths := global.CustomPaths{
+				DataDir:    viper.GetString("data-dir"),
+				ConfigDir:  viper.GetString("config-dir"),
+				StateDir:   viper.GetString("state-dir"),
+				CacheDir:   viper.GetString("cache-dir"),
+				ConfigFile: viper.GetString("config-file"),
+				Database:   viper.GetString("database"),
+				LogFile:    viper.GetString("log-file"),
+			}
+
+			// Initialize global paths with custom overrides
+			if err := global.InitWithCustom(customPaths); err != nil {
+				return fmt.Errorf("failed to initialize paths: %w", err)
 			}
 
 			// Initialize logging
@@ -53,11 +83,29 @@ Run without arguments to start the interactive TUI.`,
 	rootCmd.PersistentFlags().StringP("directory", "d", "", "working directory (default: current directory)")
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file path")
 
+	// Path configuration flags
+	rootCmd.PersistentFlags().String("data-dir", "", "custom data directory (database, sessions)")
+	rootCmd.PersistentFlags().String("config-dir", "", "custom config directory")
+	rootCmd.PersistentFlags().String("state-dir", "", "custom state directory (logs)")
+	rootCmd.PersistentFlags().String("cache-dir", "", "custom cache directory")
+	rootCmd.PersistentFlags().String("config-file", "", "custom config file path (overrides default lookup)")
+	rootCmd.PersistentFlags().String("database", "", "custom database file path")
+	rootCmd.PersistentFlags().String("log-file", "", "custom log file path")
+	rootCmd.PersistentFlags().Bool("use-opencode", false, "use opencode paths for backward compatibility")
+
 	viper.BindPFlag("print-logs", rootCmd.PersistentFlags().Lookup("print-logs"))
 	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
 	viper.BindPFlag("pure", rootCmd.PersistentFlags().Lookup("pure"))
 	viper.BindPFlag("directory", rootCmd.PersistentFlags().Lookup("directory"))
 	viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
+	viper.BindPFlag("data-dir", rootCmd.PersistentFlags().Lookup("data-dir"))
+	viper.BindPFlag("config-dir", rootCmd.PersistentFlags().Lookup("config-dir"))
+	viper.BindPFlag("state-dir", rootCmd.PersistentFlags().Lookup("state-dir"))
+	viper.BindPFlag("cache-dir", rootCmd.PersistentFlags().Lookup("cache-dir"))
+	viper.BindPFlag("config-file", rootCmd.PersistentFlags().Lookup("config-file"))
+	viper.BindPFlag("database", rootCmd.PersistentFlags().Lookup("database"))
+	viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
+	viper.BindPFlag("use-opencode", rootCmd.PersistentFlags().Lookup("use-opencode"))
 
 	// Add subcommands
 	rootCmd.AddCommand(NewRunCommand())
@@ -71,6 +119,7 @@ Run without arguments to start the interactive TUI.`,
 	rootCmd.AddCommand(NewExportCommand())
 	rootCmd.AddCommand(NewImportCommand())
 	rootCmd.AddCommand(NewUpgradeCommand())
+	rootCmd.AddCommand(NewPathsCommand())
 
 	return rootCmd
 }
@@ -93,9 +142,18 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Apply path config from file if present
+	if cfg.Paths() != nil {
+		paths := cfg.Paths()
+		if paths.UseOpenCode && !viper.IsSet("use-opencode") {
+			global.SetAppName("opencode")
+		}
+	}
+
 	// Create TUI app configuration with title showing model info
+	appName := global.GetAppName()
 	tuiConfig := tui.Config{
-		Title: fmt.Sprintf("MagiCode - %s", cfg.Model()),
+		Title: fmt.Sprintf("%s - %s", appName, cfg.Model()),
 	}
 
 	// Create the TUI app

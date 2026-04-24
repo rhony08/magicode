@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 
+	"github.com/rhony08/magicode/internal/global"
 	"github.com/spf13/cobra"
 )
 
@@ -214,6 +215,42 @@ func NewUpgradeCommand() *cobra.Command {
 		Long:  `Upgrade MagiCode to the latest version.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("(Upgrade coming in Phase 9)")
+			return nil
+		},
+	}
+}
+
+// NewPathsCommand creates the paths subcommand
+func NewPathsCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "paths",
+		Short: "Show path configuration",
+		Long: `Display all configured paths for MagiCode.
+
+Shows:
+  - Data directory (database, sessions)
+  - Config directory (magicode.json)
+  - State directory (logs)
+  - Cache directory
+  - Database file path
+  - Config file path
+  - Log file path`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths := global.GetAllPaths()
+			appName := global.GetAppName()
+
+			fmt.Printf("Application Name: %s\n", appName)
+			fmt.Println("\nPaths:")
+			fmt.Printf("  Data Directory:   %s\n", paths["data_dir"])
+			fmt.Printf("  Config Directory: %s\n", paths["config_dir"])
+			fmt.Printf("  State Directory:  %s\n", paths["state_dir"])
+			fmt.Printf("  Cache Directory:  %s\n", paths["cache_dir"])
+			fmt.Println("\nFiles:")
+			fmt.Printf("  Database:  %s\n", paths["database"])
+			fmt.Printf("  Config:    %s\n", paths["config_file"])
+			fmt.Printf("  Log:       %s\n", paths["log_file"])
+			fmt.Printf("  Plans:     %s\n", paths["plans_dir"])
+
 			return nil
 		},
 	}

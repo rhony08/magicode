@@ -35,6 +35,21 @@ type Info struct {
 	Autoshare      bool                   `json:"autoshare,omitempty"`
 	Autoupdate     interface{}            `json:"autoupdate,omitempty"`
 	Snapshot       *bool                  `json:"snapshot,omitempty"`
+	// Path configuration
+	Paths          *PathConfig            `json:"paths,omitempty"`
+}
+
+// PathConfig represents custom path configuration
+type PathConfig struct {
+	DataDir    string `json:"data_dir,omitempty"`    // Custom data directory
+	ConfigDir  string `json:"config_dir,omitempty"`  // Custom config directory
+	StateDir   string `json:"state_dir,omitempty"`   // Custom state directory
+	CacheDir   string `json:"cache_dir,omitempty"`   // Custom cache directory
+	ConfigFile string `json:"config_file,omitempty"` // Custom config file path
+	Database   string `json:"database,omitempty"`    // Custom database file path
+	LogFile    string `json:"log_file,omitempty"`    // Custom log file path
+	// Backward compatibility
+	UseOpenCode bool `json:"use_opencode,omitempty"` // Use opencode paths instead of magicode
 }
 
 // Provider represents provider configuration
@@ -106,6 +121,7 @@ func (s *Service) load() error {
 
 	// Load global config if directory specified
 	if s.globalDir != "" {
+		// Check for magicode config files
 		for _, file := range []string{"magicode.jsonc", "magicode.json", "config.json"} {
 			path := filepath.Join(s.globalDir, file)
 			if _, err := os.Stat(path); err == nil {
@@ -115,10 +131,27 @@ func (s *Service) load() error {
 				break
 			}
 		}
+
+		// Also check for opencode config files (backward compatibility)
+		for _, file := range []string{"opencode.jsonc", "opencode.json"} {
+			path := filepath.Join(s.globalDir, file)
+			if _, err := os.Stat(path); err == nil {
+				if err := s.loadFile(path); err != nil {
+					return fmt.Errorf("failed to load opencode config: %w", err)
+				}
+				// Mark as using opencode paths
+				if s.config.Paths == nil {
+					s.config.Paths = &PathConfig{}
+				}
+				s.config.Paths.UseOpenCode = true
+				break
+			}
+		}
 	}
 
 	// Load project config if directory specified
 	if s.directory != "" {
+		// Check magicode config files
 		projectConfig := filepath.Join(s.directory, "magicode.json")
 		if _, err := os.Stat(projectConfig); err == nil {
 			if err := s.loadFile(projectConfig); err != nil {
@@ -134,6 +167,29 @@ func (s *Service) load() error {
 			}
 		}
 
+		// Check opencode config files (backward compatibility)
+		opencodeConfig := filepath.Join(s.directory, "opencode.json")
+		if _, err := os.Stat(opencodeConfig); err == nil {
+			if err := s.loadFile(opencodeConfig); err != nil {
+				return err
+			}
+			if s.config.Paths == nil {
+				s.config.Paths = &PathConfig{}
+			}
+			s.config.Paths.UseOpenCode = true
+		}
+
+		opencodeConfigC := filepath.Join(s.directory, "opencode.jsonc")
+		if _, err := os.Stat(opencodeConfigC); err == nil {
+			if err := s.loadFile(opencodeConfigC); err != nil {
+				return err
+			}
+			if s.config.Paths == nil {
+				s.config.Paths = &PathConfig{}
+			}
+			s.config.Paths.UseOpenCode = true
+		}
+
 		// Check .magicode directory
 		magicodeDir := filepath.Join(s.directory, ".magicode")
 		if stat, err := os.Stat(magicodeDir); err == nil && stat.IsDir() {
@@ -143,6 +199,23 @@ func (s *Service) load() error {
 					if err := s.loadFile(path); err != nil {
 						return err
 					}
+				}
+			}
+		}
+
+		// Check .opencode directory (backward compatibility)
+		opencodeDir := filepath.Join(s.directory, ".opencode")
+		if stat, err := os.Stat(opencodeDir); err == nil && stat.IsDir() {
+			for _, file := range []string{"opencode.json", "opencode.jsonc"} {
+				path := filepath.Join(opencodeDir, file)
+				if _, err := os.Stat(path); err == nil {
+					if err := s.loadFile(path); err != nil {
+						return err
+					}
+					if s.config.Paths == nil {
+						s.config.Paths = &PathConfig{}
+					}
+					s.config.Paths.UseOpenCode = true
 				}
 			}
 		}
@@ -206,6 +279,37 @@ func (s *Service) merge(other *Info) {
 		s.config.Snapshot = other.Snapshot
 	}
 
+	// Merge paths
+	if other.Paths != nil {
+		if s.config.Paths == nil {
+			s.config.Paths = &PathConfig{}
+		}
+		if other.Paths.DataDir != "" {
+			s.config.Paths.DataDir = other.Paths.DataDir
+		}
+		if other.Paths.ConfigDir != "" {
+			s.config.Paths.ConfigDir = other.Paths.ConfigDir
+		}
+		if other.Paths.StateDir != "" {
+			s.config.Paths.StateDir = other.Paths.StateDir
+		}
+		if other.Paths.CacheDir != "" {
+			s.config.Paths.CacheDir = other.Paths.CacheDir
+		}
+		if other.Paths.ConfigFile != "" {
+			s.config.Paths.ConfigFile = other.Paths.ConfigFile
+		}
+		if other.Paths.Database != "" {
+			s.config.Paths.Database = other.Paths.Database
+		}
+		if other.Paths.LogFile != "" {
+			s.config.Paths.LogFile = other.Paths.LogFile
+		}
+		if other.Paths.UseOpenCode {
+			s.config.Paths.UseOpenCode = true
+		}
+	}
+
 	// Merge arrays
 	s.config.Instructions = mergeStringArrays(s.config.Instructions, other.Instructions)
 	s.config.DisabledProviders = mergeStringArrays(s.config.DisabledProviders, other.DisabledProviders)
@@ -243,6 +347,27 @@ func (s *Service) SmallModel() string {
 		return s.config.SmallModel
 	}
 	return "anthropic/claude-3-5-haiku"
+}
+
+// Paths returns the configured paths
+func (s *Service) Paths() *PathConfig {
+	return s.config.Paths
+}
+
+// LogLevel returns the configured log level
+func (s *Service) LogLevel() string {
+	if s.config.LogLevel != "" {
+		return s.config.LogLevel
+	}
+	return "INFO"
+}
+
+// UseOpenCode returns whether to use opencode paths
+func (s *Service) UseOpenCode() bool {
+	if s.config.Paths != nil {
+		return s.config.Paths.UseOpenCode
+	}
+	return false
 }
 
 // ParseModel parses a model string (provider/model format)
