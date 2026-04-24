@@ -275,3 +275,53 @@ func (l *Logger) SetWriter(w io.Writer) {
 	defer l.mu.Unlock()
 	l.writer = w
 }
+
+// Convenience functions that use Default logger with variadic key-value pairs
+// These match the slog-style API: log.Debug("message", "key1", value1, "key2", value2)
+
+// Debug logs a debug message using Default logger
+func Debug(msg string, keysAndValues ...interface{}) {
+	if Default == nil {
+		InitDefault()
+	}
+	data := keysToMap(keysAndValues)
+	Default.log(DEBUG, msg, data)
+}
+
+// Info logs an info message using Default logger
+func Info(msg string, keysAndValues ...interface{}) {
+	if Default == nil {
+		InitDefault()
+	}
+	data := keysToMap(keysAndValues)
+	Default.log(INFO, msg, data)
+}
+
+// Warn logs a warning message using Default logger
+func Warn(msg string, keysAndValues ...interface{}) {
+	if Default == nil {
+		InitDefault()
+	}
+	data := keysToMap(keysAndValues)
+	Default.log(WARN, msg, data)
+}
+
+// Error logs an error message using Default logger
+func Error(msg string, keysAndValues ...interface{}) {
+	if Default == nil {
+		InitDefault()
+	}
+	data := keysToMap(keysAndValues)
+	Default.log(ERROR, msg, data)
+}
+
+// keysToMap converts variadic key-value pairs to a map
+func keysToMap(kv []interface{}) map[string]interface{} {
+	data := make(map[string]interface{})
+	for i := 0; i < len(kv)-1; i += 2 {
+		if key, ok := kv[i].(string); ok {
+			data[key] = kv[i+1]
+		}
+	}
+	return data
+}
