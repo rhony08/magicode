@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/opencode-ai/opencode-go/internal/config"
 	"github.com/opencode-ai/opencode-go/internal/global"
+	"github.com/opencode-ai/opencode-go/internal/tui"
 	"github.com/opencode-ai/opencode-go/internal/util/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -91,10 +93,25 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// TODO: Initialize TUI (Phase 6)
-	fmt.Printf("OpenCode v%s\n", cmd.Root().Version)
-	fmt.Printf("Starting in: %s\n", directory)
-	fmt.Printf("Model: %s\n", cfg.Model())
-	fmt.Println("(TUI implementation coming in Phase 6)")
+	// Create TUI app configuration with title showing model info
+	tuiConfig := tui.Config{
+		Title: fmt.Sprintf("OpenCode - %s", cfg.Model()),
+	}
+
+	// Create the TUI app
+	app := tui.NewApp(tuiConfig)
+
+	// Run the TUI
+	p := tea.NewProgram(
+		app,
+		tea.WithAltScreen(),       // Use alternate screen buffer
+		tea.WithMouseCellMotion(), // Enable mouse support
+	)
+
+	// Run the program
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("failed to run TUI: %w", err)
+	}
+
 	return nil
 }
