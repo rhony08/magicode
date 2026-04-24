@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -274,10 +275,15 @@ func TestAgentRoutes(t *testing.T) {
 
 // TestFileRoutes tests file routes.
 func TestFileRoutes(t *testing.T) {
-	s := New("/tmp/test", DefaultConfig())
+	// Create test directory and file
+	testDir := t.TempDir()
+	testFile := testDir + "/test.txt"
+	os.WriteFile(testFile, []byte("test content"), 0644)
+
+	s := New(testDir, DefaultConfig())
 
 	// Test file read
-	req := httptest.NewRequest("GET", "/file/read", nil)
+	req := httptest.NewRequest("GET", "/file/read?path="+testFile, nil)
 	resp, err := s.app.Test(req, 1000)
 	if err != nil {
 		t.Errorf("File read request failed: %v", err)

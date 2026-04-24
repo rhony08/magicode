@@ -1,13 +1,21 @@
-// Package server provides HTTP/WebSocket server for MagiCode.
 package server
 
 import (
 	"context"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/rhony08/magicode/internal/bus"
+	"github.com/rhony08/magicode/internal/config"
+	"github.com/rhony08/magicode/internal/database"
+	"github.com/rhony08/magicode/internal/global"
+	"github.com/rhony08/magicode/internal/lsp"
+	"github.com/rhony08/magicode/internal/pty"
+	"github.com/rhony08/magicode/internal/provider"
+	"github.com/rhony08/magicode/internal/tool"
 )
 
 // Listener represents a server listener.
@@ -69,6 +77,17 @@ func DefaultConfig() Config {
 	}
 }
 
+// Services holds all service references for the server
+type Services struct {
+	DB       *database.Database
+	Config   *config.Service
+	Bus      *bus.Service
+	Provider *provider.ProviderRegistry
+	PTY      *pty.Manager
+	LSP      *lsp.Manager
+	Tools    *tool.Registry
+}
+
 // Server represents the MagiCode HTTP server.
 type Server struct {
 	app       *fiber.App
@@ -80,11 +99,7 @@ type Server struct {
 	running   bool
 
 	// Services
-	bus      interface{} // Bus service (will be typed later)
-	database interface{} // Database service
-	provider interface{} // Provider service
-	lsp      interface{} // LSP service
-	pty      interface{} // PTY manager
+	services Services
 }
 
 // New creates a new server.
@@ -126,6 +141,61 @@ func New(directory string, cfg Config) *Server {
 	return s
 }
 
+// WithServices attaches services to the server
+func (s *Server) WithServices(svcs Services) *Server {
+	s.services = svcs
+	return s
+}
+
+// InitServices initializes all services
+func (s *Server) InitServices() error {
+	// Initialize database
+	dbPath := global.DatabasePath()
+	db, err := database.New(s.ctx, database.Config{Path: dbPath})
+	if err != nil {
+		return err
+	}
+	s.services.DB = db
+
+	// Initialize config
+	cfg, err := config.New(s.directory, global.Path.Config)
+	if err != nil {
+		// Continue with defaults
+		cfg = config.NewDefault()
+	}
+	s.services.Config = cfg
+
+	// Initialize bus
+	s.services.Bus = bus.NewDefault()
+
+	// Initialize provider registry
+	s.services.Provider = provider.NewProviderRegistry()
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		s.services.Provider.Register(provider.NewAnthropicProvider(os.Getenv("ANTHROPIC_API_KEY")))
+	}
+	if os.Getenv("OPENAI_API_KEY") != "" {
+		s.services.Provider.Register(provider.NewOpenAIProvider(os.Getenv("OPENAI_API_KEY")))
+	}
+
+	// Initialize PTY manager
+	s.services.PTY = pty.NewManager(s.directory, s.services.Bus)
+
+	// Initialize LSP manager
+	s.services.LSP = lsp.NewManager(s.directory)
+
+	// Initialize tool registry
+	s.services.Tools = tool.NewRegistry()
+	s.services.Tools.Register(tool.NewReadTool())
+	s.services.Tools.Register(tool.NewWriteTool())
+	s.services.Tools.Register(tool.NewEditTool())
+	s.services.Tools.Register(tool.NewGlobTool())
+	s.services.Tools.Register(tool.NewGrepTool())
+	s.services.Tools.Register(tool.NewBashTool())
+	s.services.Tools.Register(tool.NewWebFetchTool())
+
+	return nil
+}
+
 // setupMiddleware configures middleware.
 func (s *Server) setupMiddleware() {
 	// Recovery middleware
@@ -150,27 +220,22 @@ func (s *Server) setupRoutes() {
 	// Global routes (no instance required)
 	s.setupGlobalRoutes()
 
-	// Instance routes (require instance context)
+	// Instance routes (require instance context) - defined in routes.go
 	s.setupInstanceRoutes()
 }
 
 // setupGlobalRoutes configures global routes.
 func (s *Server) setupGlobalRoutes() {
-	global := s.app.Group("/global")
+	globalGroup := s.app.Group("/global")
 
 	// Health check
-	global.Get("/health", s.handleHealth)
+	globalGroup.Get("/health", s.handleHealth)
 
 	// Version info
-	global.Get("/version", s.handleVersion)
+	globalGroup.Get("/version", s.handleVersion)
 
 	// Event stream (SSE)
-	global.Get("/event", s.handleGlobalEventStream)
-}
-
-// setupInstanceRoutes configures instance routes.
-func (s *Server) setupRoutesOnGroup() {
-	// These will be setup when instance middleware is applied
+	globalGroup.Get("/event", s.handleGlobalEventStream)
 }
 
 // App returns the Fiber app.
@@ -224,6 +289,21 @@ func (s *Server) Shutdown() error {
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
+
+	// Close services
+	if s.services.DB != nil {
+		s.services.DB.Close()
+	}
+	if s.services.Bus != nil {
+		s.services.Bus.Close()
+	}
+	if s.services.PTY != nil {
+		s.services.PTY.Shutdown()
+	}
+	if s.services.LSP != nil {
+		s.services.LSP.Close()
+	}
+
 	return s.app.Shutdown()
 }
 
@@ -269,4 +349,9 @@ func (s *Server) Directory() string {
 // Config returns the server config.
 func (s *Server) Config() Config {
 	return s.config
+}
+
+// Services returns the server services.
+func (s *Server) Services() Services {
+	return s.services
 }
