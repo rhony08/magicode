@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/rhony08/magicode/internal/config"
+	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/global"
 	"github.com/rhony08/magicode/internal/provider"
 	"github.com/rhony08/magicode/internal/server"
@@ -111,18 +114,73 @@ func NewSessionCommand() *cobra.Command {
 		Long:  `List, create, delete, and manage coding sessions.`,
 	}
 
+	// Add --all flag to parent command for list subcommand
+	var showAll bool
+
 	// Add subcommands
-	cmd.AddCommand(&cobra.Command{
+	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO: Connect to database and list sessions
+			ctx := context.Background()
+
+			// Initialize database
+			dbPath := global.DatabasePath()
+			db, err := database.New(ctx, database.Config{Path: dbPath})
+			if err != nil {
+				return fmt.Errorf("failed to open database: %w", err)
+			}
+			defer db.Close()
+
+			sessionStorage := database.NewSessionStorage(db)
+
+			var sessions []database.Session
+			if showAll {
+				// List all sessions from all directories
+				sessions, err = sessionStorage.ListAll(ctx)
+				if err != nil {
+					return fmt.Errorf("failed to list sessions: %w", err)
+				}
+			} else {
+				// List sessions for current directory only
+				directory := viper.GetString("directory")
+				if directory == "" {
+					directory, _ = os.Getwd()
+				}
+				sessions, err = sessionStorage.ListByDirectory(ctx, directory)
+				if err != nil {
+					return fmt.Errorf("failed to list sessions: %w", err)
+				}
+			}
+
 			fmt.Println("Sessions:")
-			fmt.Println("  (No sessions found)")
-			fmt.Println("\nTip: Start a new session with 'magicode' or 'magicode session create'")
+			if len(sessions) == 0 {
+				if showAll {
+					fmt.Println("  (No sessions found in database)")
+				} else {
+					directory := viper.GetString("directory")
+					if directory == "" {
+						directory, _ = os.Getwd()
+					}
+					fmt.Printf("  (No sessions found for directory: %s)\n", directory)
+					fmt.Println("\n  Use --all to see sessions from all directories")
+				}
+			} else {
+				for _, s := range sessions {
+					timeStr := time.UnixMilli(s.Timestamps.TimeCreated).Format("2006-01-02 15:04")
+					fmt.Printf("  %s | %s | %s\n", s.ID[:20]+"...", timeStr, s.Title)
+					if showAll {
+						fmt.Printf("    Directory: %s\n", s.Directory)
+					}
+				}
+				fmt.Printf("\n  Total: %d sessions\n", len(sessions))
+			}
+
 			return nil
 		},
-	})
+	}
+	listCmd.Flags().BoolVarP(&showAll, "all", "a", false, "show sessions from all directories")
+	cmd.AddCommand(listCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "create [title]",
@@ -159,10 +217,36 @@ func NewSessionCommand() *cobra.Command {
 			if len(args) < 1 {
 				return fmt.Errorf("requires session id argument")
 			}
-			// TODO: Connect to database and show session
-			fmt.Printf("Session: %s\n", args[0])
-			fmt.Println("  Title: (Session title)")
-			fmt.Println("  Messages: 0")
+
+			ctx := context.Background()
+			dbPath := global.DatabasePath()
+			db, err := database.New(ctx, database.Config{Path: dbPath})
+			if err != nil {
+				return fmt.Errorf("failed to open database: %w", err)
+			}
+			defer db.Close()
+
+			sessionStorage := database.NewSessionStorage(db)
+			session, err := sessionStorage.Get(ctx, args[0])
+			if err != nil {
+				return fmt.Errorf("session not found: %s", args[0])
+			}
+
+			fmt.Printf("Session: %s\n", session.ID)
+			fmt.Printf("  Title: %s\n", session.Title)
+			fmt.Printf("  Directory: %s\n", session.Directory)
+			fmt.Printf("  Slug: %s\n", session.Slug)
+			fmt.Printf("  Project ID: %s\n", session.ProjectID)
+			fmt.Printf("  Created: %s\n", time.UnixMilli(session.Timestamps.TimeCreated).Format("2006-01-02 15:04:05"))
+			fmt.Printf("  Updated: %s\n", time.UnixMilli(session.Timestamps.TimeUpdated).Format("2006-01-02 15:04:05"))
+
+			// Count messages
+			msgStorage := database.NewMessageStorage(db)
+			messages, err := msgStorage.List(ctx, session.ID)
+			if err == nil {
+				fmt.Printf("  Messages: %d\n", len(messages))
+			}
+
 			return nil
 		},
 	})

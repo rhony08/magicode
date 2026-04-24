@@ -83,42 +83,9 @@ func (s *SessionStorage) Get(ctx context.Context, id string) (*Session, error) {
 	FROM session WHERE id = ?`
 
 	row := s.db.QueryRow(ctx, query, id)
-	var session Session
-	var summaryDiffs, revert, permission sqlNullableString
-	var timeCompacting, timeArchived sql.NullInt64
-
-	err := row.Scan(
-		&session.ID, &session.ProjectID, &session.WorkspaceID, &session.ParentID,
-		&session.Slug, &session.Directory, &session.Title, &session.Version,
-		&session.ShareURL, &session.SummaryAdditions, &session.SummaryDeletions,
-		&session.SummaryFiles, &summaryDiffs, &revert, &permission,
-		&session.Timestamps.TimeCreated, &session.Timestamps.TimeUpdated,
-		&timeCompacting, &timeArchived,
-	)
+	session, err := s.scanSession(row)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
-			return nil, fmt.Errorf("session not found: %s", id)
-		}
-		return nil, fmt.Errorf("failed to get session: %w", err)
-	}
-
-	// Handle nullable integer fields
-	if timeCompacting.Valid {
-		session.TimeCompacting = timeCompacting.Int64
-	}
-	if timeArchived.Valid {
-		session.TimeArchived = timeArchived.Int64
-	}
-
-	// Deserialize JSON fields
-	if summaryDiffs.Valid && summaryDiffs.String != "" {
-		json.Unmarshal([]byte(summaryDiffs.String), &session.SummaryDiffs)
-	}
-	if revert.Valid && revert.String != "" {
-		json.Unmarshal([]byte(revert.String), &session.Revert)
-	}
-	if permission.Valid && permission.String != "" {
-		json.Unmarshal([]byte(permission.String), &session.Permission)
+		return nil, fmt.Errorf("session not found: %s", id)
 	}
 
 	return &session, nil
@@ -162,47 +129,99 @@ func (s *SessionStorage) List(ctx context.Context, projectID string) ([]Session,
 	}
 	defer rows.Close()
 
+	return s.scanSessions(rows)
+}
+
+// ListAll retrieves all sessions (not filtered by directory)
+func (s *SessionStorage) ListAll(ctx context.Context) ([]Session, error) {
+	query := `
+	SELECT id, project_id, workspace_id, parent_id, slug, directory, title, version,
+		share_url, summary_additions, summary_deletions, summary_files, summary_diffs,
+		revert, permission, time_created, time_updated, time_compacting, time_archived
+	FROM session ORDER BY time_created DESC`
+
+	rows, err := s.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all sessions: %w", err)
+	}
+	defer rows.Close()
+
+	return s.scanSessions(rows)
+}
+
+// scanSessions scans multiple session rows
+func (s *SessionStorage) scanSessions(rows *sql.Rows) ([]Session, error) {
 	var sessions []Session
 	for rows.Next() {
-		var session Session
-		var summaryDiffs, revert, permission sqlNullableString
-		var timeCompacting, timeArchived sql.NullInt64
-
-		err := rows.Scan(
-			&session.ID, &session.ProjectID, &session.WorkspaceID, &session.ParentID,
-			&session.Slug, &session.Directory, &session.Title, &session.Version,
-			&session.ShareURL, &session.SummaryAdditions, &session.SummaryDeletions,
-			&session.SummaryFiles, &summaryDiffs, &revert, &permission,
-			&session.Timestamps.TimeCreated, &session.Timestamps.TimeUpdated,
-			&timeCompacting, &timeArchived,
-		)
+		session, err := s.scanSession(rows)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan session: %w", err)
+			return nil, err
 		}
-
-		// Handle nullable integer fields
-		if timeCompacting.Valid {
-			session.TimeCompacting = timeCompacting.Int64
-		}
-		if timeArchived.Valid {
-			session.TimeArchived = timeArchived.Int64
-		}
-
-		// Deserialize JSON fields
-		if summaryDiffs.Valid && summaryDiffs.String != "" {
-			json.Unmarshal([]byte(summaryDiffs.String), &session.SummaryDiffs)
-		}
-		if revert.Valid && revert.String != "" {
-			json.Unmarshal([]byte(revert.String), &session.Revert)
-		}
-		if permission.Valid && permission.String != "" {
-			json.Unmarshal([]byte(permission.String), &session.Permission)
-		}
-
 		sessions = append(sessions, session)
 	}
-
 	return sessions, nil
+}
+
+// scanSession scans a single session from a row
+func (s *SessionStorage) scanSession(row interface{ Scan(...any) error }) (Session, error) {
+	var session Session
+	var workspaceID, parentID, shareURL sqlNullableString
+	var summaryDiffs, revert, permission sqlNullableString
+	var summaryAdditions, summaryDeletions, summaryFiles sql.NullInt64
+	var timeCompacting, timeArchived sql.NullInt64
+
+	err := row.Scan(
+		&session.ID, &session.ProjectID, &workspaceID, &parentID,
+		&session.Slug, &session.Directory, &session.Title, &session.Version,
+		&shareURL, &summaryAdditions, &summaryDeletions, &summaryFiles,
+		&summaryDiffs, &revert, &permission,
+		&session.Timestamps.TimeCreated, &session.Timestamps.TimeUpdated,
+		&timeCompacting, &timeArchived,
+	)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to scan session: %w", err)
+	}
+
+	// Handle nullable string fields
+	if workspaceID.Valid {
+		session.WorkspaceID = workspaceID.String
+	}
+	if parentID.Valid {
+		session.ParentID = parentID.String
+	}
+	if shareURL.Valid {
+		session.ShareURL = shareURL.String
+	}
+
+	// Handle nullable integer fields
+	if summaryAdditions.Valid {
+		session.SummaryAdditions = int(summaryAdditions.Int64)
+	}
+	if summaryDeletions.Valid {
+		session.SummaryDeletions = int(summaryDeletions.Int64)
+	}
+	if summaryFiles.Valid {
+		session.SummaryFiles = int(summaryFiles.Int64)
+	}
+	if timeCompacting.Valid {
+		session.TimeCompacting = timeCompacting.Int64
+	}
+	if timeArchived.Valid {
+		session.TimeArchived = timeArchived.Int64
+	}
+
+	// Deserialize JSON fields
+	if summaryDiffs.Valid && summaryDiffs.String != "" {
+		json.Unmarshal([]byte(summaryDiffs.String), &session.SummaryDiffs)
+	}
+	if revert.Valid && revert.String != "" {
+		json.Unmarshal([]byte(revert.String), &session.Revert)
+	}
+	if permission.Valid && permission.String != "" {
+		json.Unmarshal([]byte(permission.String), &session.Permission)
+	}
+
+	return session, nil
 }
 
 // ListByDirectory retrieves sessions by directory
@@ -219,47 +238,7 @@ func (s *SessionStorage) ListByDirectory(ctx context.Context, directory string) 
 	}
 	defer rows.Close()
 
-	var sessions []Session
-	for rows.Next() {
-		var session Session
-		var summaryDiffs, revert, permission sqlNullableString
-		var timeCompacting, timeArchived sql.NullInt64
-
-		err := rows.Scan(
-			&session.ID, &session.ProjectID, &session.WorkspaceID, &session.ParentID,
-			&session.Slug, &session.Directory, &session.Title, &session.Version,
-			&session.ShareURL, &session.SummaryAdditions, &session.SummaryDeletions,
-			&session.SummaryFiles, &summaryDiffs, &revert, &permission,
-			&session.Timestamps.TimeCreated, &session.Timestamps.TimeUpdated,
-			&timeCompacting, &timeArchived,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan session: %w", err)
-		}
-
-		// Handle nullable integer fields
-		if timeCompacting.Valid {
-			session.TimeCompacting = timeCompacting.Int64
-		}
-		if timeArchived.Valid {
-			session.TimeArchived = timeArchived.Int64
-		}
-
-		// Deserialize JSON fields
-		if summaryDiffs.Valid && summaryDiffs.String != "" {
-			json.Unmarshal([]byte(summaryDiffs.String), &session.SummaryDiffs)
-		}
-		if revert.Valid && revert.String != "" {
-			json.Unmarshal([]byte(revert.String), &session.Revert)
-		}
-		if permission.Valid && permission.String != "" {
-			json.Unmarshal([]byte(permission.String), &session.Permission)
-		}
-
-		sessions = append(sessions, session)
-	}
-
-	return sessions, nil
+	return s.scanSessions(rows)
 }
 
 // Update updates an existing session
