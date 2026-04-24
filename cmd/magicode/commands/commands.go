@@ -168,7 +168,7 @@ func NewSessionCommand() *cobra.Command {
 			} else {
 				for _, s := range sessions {
 					timeStr := time.UnixMilli(s.Timestamps.TimeCreated).Format("2006-01-02 15:04")
-					fmt.Printf("  %s | %s | %s\n", s.ID[:20]+"...", timeStr, s.Title)
+					fmt.Printf("  %s | %s | %s\n", s.ID, timeStr, s.Title)
 					if showAll {
 						fmt.Printf("    Directory: %s\n", s.Directory)
 					}
