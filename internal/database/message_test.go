@@ -24,18 +24,32 @@ func TestMessageCreate(t *testing.T) {
 	}
 
 	// Create message
-	store := NewMessageStorage(db)
+	msgStore := NewMessageStorage(db)
+	partStore := NewPartStorage(db)
 	ctx := context.Background()
 
-	message, err := store.Create(ctx, Message{
+	message, err := msgStore.Create(ctx, Message{
 		SessionID: session.ID,
 		Data: MessageInfo{
 			Role:    "user",
-			Content: "Hello, world!",
+			ModelID: "test-model",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Failed to create message: %v", err)
+	}
+
+	// Create a part with the content
+	part, err := partStore.Create(ctx, Part{
+		MessageID: message.ID,
+		SessionID: session.ID,
+		Data: PartData{
+			Type: "text",
+			Text: "Hello, world!",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create part: %v", err)
 	}
 
 	// Check auto-generated fields
@@ -46,16 +60,25 @@ func TestMessageCreate(t *testing.T) {
 		t.Error("TimeCreated should be set")
 	}
 
-	// Verify can be retrieved
-	retrieved, err := store.Get(ctx, message.ID)
+	// Verify message can be retrieved
+	retrieved, err := msgStore.Get(ctx, message.ID)
 	if err != nil {
 		t.Fatalf("Failed to retrieve message: %v", err)
 	}
 	if retrieved.Data.Role != "user" {
 		t.Errorf("Expected role 'user', got '%s'", retrieved.Data.Role)
 	}
-	if retrieved.Data.Content != "Hello, world!" {
-		t.Errorf("Expected content 'Hello, world!', got '%s'", retrieved.Data.Content)
+	if retrieved.Data.ModelID != "test-model" {
+		t.Errorf("Expected modelID 'test-model', got '%s'", retrieved.Data.ModelID)
+	}
+
+	// Verify part can be retrieved
+	retrievedPart, err := partStore.Get(ctx, part.ID)
+	if err != nil {
+		t.Fatalf("Failed to retrieve part: %v", err)
+	}
+	if retrievedPart.Data.Text != "Hello, world!" {
+		t.Errorf("Expected text 'Hello, world!', got '%s'", retrievedPart.Data.Text)
 	}
 }
 
@@ -76,25 +99,26 @@ func TestMessageList(t *testing.T) {
 	}
 
 	// Create multiple messages
-	store := NewMessageStorage(db)
+	msgStore := NewMessageStorage(db)
 	ctx := context.Background()
 
 	roles := []string{"user", "assistant", "user"}
 	for i, role := range roles {
-		_, err := store.Create(ctx, Message{
+		msg, err := msgStore.Create(ctx, Message{
 			SessionID: session.ID,
 			Data: MessageInfo{
 				Role:    role,
-				Content: fmt.Sprintf("Message %d", i),
+				ModelID: fmt.Sprintf("model-%d", i),
 			},
 		})
 		if err != nil {
 			t.Fatalf("Failed to create message %d: %v", i, err)
 		}
+		_ = msg // Message created
 	}
 
 	// List messages
-	messages, err := store.List(ctx, session.ID)
+	messages, err := msgStore.List(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("Failed to list messages: %v", err)
 	}
@@ -129,15 +153,15 @@ func TestMessageListWithLimit(t *testing.T) {
 	}
 
 	// Create 5 messages
-	store := NewMessageStorage(db)
+	msgStore := NewMessageStorage(db)
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		_, err := store.Create(ctx, Message{
+		_, err := msgStore.Create(ctx, Message{
 			SessionID: session.ID,
 			Data: MessageInfo{
 				Role:    "user",
-				Content: fmt.Sprintf("Message %d", i),
+				ModelID: fmt.Sprintf("model-%d", i),
 			},
 		})
 		if err != nil {
@@ -146,7 +170,7 @@ func TestMessageListWithLimit(t *testing.T) {
 	}
 
 	// List with limit
-	messages, err := store.ListWithLimit(ctx, session.ID, 3)
+	messages, err := msgStore.ListWithLimit(ctx, session.ID, 3)
 	if err != nil {
 		t.Fatalf("Failed to list messages with limit: %v", err)
 	}
@@ -156,11 +180,11 @@ func TestMessageListWithLimit(t *testing.T) {
 	}
 
 	// Should be last 3 in chronological order
-	if messages[0].Data.Content != "Message 2" {
-		t.Errorf("First should be 'Message 2', got '%s'", messages[0].Data.Content)
+	if messages[0].Data.ModelID != "model-2" {
+		t.Errorf("First should be 'model-2', got '%s'", messages[0].Data.ModelID)
 	}
-	if messages[2].Data.Content != "Message 4" {
-		t.Errorf("Last should be 'Message 4', got '%s'", messages[2].Data.Content)
+	if messages[2].Data.ModelID != "model-4" {
+		t.Errorf("Last should be 'model-4', got '%s'", messages[2].Data.ModelID)
 	}
 }
 
@@ -180,14 +204,14 @@ func TestMessageUpdate(t *testing.T) {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	store := NewMessageStorage(db)
+	msgStore := NewMessageStorage(db)
 	ctx := context.Background()
 
-	message, err := store.Create(ctx, Message{
+	message, err := msgStore.Create(ctx, Message{
 		SessionID: session.ID,
 		Data: MessageInfo{
 			Role:    "assistant",
-			Content: "Original response",
+			ModelID: "test-model",
 		},
 	})
 	if err != nil {
@@ -195,29 +219,25 @@ func TestMessageUpdate(t *testing.T) {
 	}
 
 	// Update message
-	message.Data.Content = "Updated response"
+	message.Data.ModelID = "updated-model"
 	message.Data.Cost = 1000
-	message.Data.Tokens = 500
 
-	err = store.Update(ctx, *message)
+	err = msgStore.Update(ctx, *message)
 	if err != nil {
 		t.Fatalf("Failed to update message: %v", err)
 	}
 
 	// Verify update
-	retrieved, err := store.Get(ctx, message.ID)
+	retrieved, err := msgStore.Get(ctx, message.ID)
 	if err != nil {
 		t.Fatalf("Failed to get updated message: %v", err)
 	}
 
-	if retrieved.Data.Content != "Updated response" {
-		t.Errorf("Expected 'Updated response', got '%s'", retrieved.Data.Content)
+	if retrieved.Data.ModelID != "updated-model" {
+		t.Errorf("Expected 'updated-model', got '%s'", retrieved.Data.ModelID)
 	}
 	if retrieved.Data.Cost != 1000 {
 		t.Errorf("Expected cost 1000, got %d", retrieved.Data.Cost)
-	}
-	if retrieved.Data.Tokens != 500 {
-		t.Errorf("Expected tokens 500, got %d", retrieved.Data.Tokens)
 	}
 }
 
@@ -244,7 +264,7 @@ func TestMessageDelete(t *testing.T) {
 		SessionID: session.ID,
 		Data: MessageInfo{
 			Role:    "user",
-			Content: "To delete",
+			ModelID: "to-delete-model",
 		},
 	})
 	if err != nil {

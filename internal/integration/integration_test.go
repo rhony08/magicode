@@ -60,7 +60,7 @@ func TestIntegrationFullFlow(t *testing.T) {
 			SessionID: created.ID,
 			Data: database.MessageInfo{
 				Role:    "user",
-				Content: "Hello, world!",
+				ModelID: "test-model",
 			},
 		}
 		createdMsg, err := msgStorage.Create(ctx, msg)
@@ -445,7 +445,7 @@ func TestIntegrationConcurrency(t *testing.T) {
 					SessionID: created.ID,
 					Data: database.MessageInfo{
 						Role:    "user",
-						Content: fmt.Sprintf("Message %d", id),
+						ModelID: fmt.Sprintf("model-%d", id),
 					},
 				}
 				msgStorage.Create(ctx, msg)
