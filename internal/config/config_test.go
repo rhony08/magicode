@@ -41,7 +41,7 @@ func TestNewWithDirectory(t *testing.T) {
 	globalDir := t.TempDir()
 
 	// Create a config file
-	configPath := filepath.Join(tmpDir, "opencode.json")
+	configPath := filepath.Join(tmpDir, "magicode.json")
 	configContent := `{
 		"model": "anthropic/claude-opus-4",
 		"username": "testuser",
@@ -73,7 +73,7 @@ func TestLoadJSONC(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a JSONC config file with comments
-	configPath := filepath.Join(tmpDir, "opencode.jsonc")
+	configPath := filepath.Join(tmpDir, "magicode.jsonc")
 	configContent := `{
 		// This is a comment
 		"model": "openai/gpt-4",
@@ -102,7 +102,7 @@ func TestMergeConfigs(t *testing.T) {
 	globalDir := t.TempDir()
 
 	// Global config
-	globalConfig := filepath.Join(globalDir, "opencode.json")
+	globalConfig := filepath.Join(globalDir, "magicode.json")
 	globalContent := `{
 		"model": "anthropic/claude-sonnet-4-5",
 		"username": "globaluser",
@@ -111,7 +111,7 @@ func TestMergeConfigs(t *testing.T) {
 	os.WriteFile(globalConfig, []byte(globalContent), 0644)
 
 	// Project config
-	projectConfig := filepath.Join(tmpDir, "opencode.json")
+	projectConfig := filepath.Join(tmpDir, "magicode.json")
 	projectContent := `{
 		"model": "anthropic/claude-opus-4",
 		"instructions": ["project instruction"],
@@ -264,7 +264,7 @@ func TestConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create config file
-	configPath := filepath.Join(tmpDir, "opencode.json")
+	configPath := filepath.Join(tmpDir, "magicode.json")
 	os.WriteFile(configPath, []byte("{}"), 0644)
 
 	cfg, err := New(tmpDir, t.TempDir())
@@ -281,14 +281,15 @@ func TestConfigPath(t *testing.T) {
 func TestDotOpencodeDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create .opencode directory with config
-	opencodeDir := filepath.Join(tmpDir, ".opencode")
-	os.MkdirAll(opencodeDir, 0755)
+	// Create .magicode directory with config
+magicodeDir := filepath.Join(tmpDir, ".magicode")
 
-	configPath := filepath.Join(opencodeDir, "opencode.json")
+	os.MkdirAll(magicodeDir, 0755)
+
+	configPath := filepath.Join(magicodeDir, "magicode.json")
 	configContent := `{
 		"model": "anthropic/claude-opus-4",
-		"username": "dotopencodeuser"
+		"username": "dotmagicodeuser"
 	}`
 	os.WriteFile(configPath, []byte(configContent), 0644)
 
@@ -299,6 +300,6 @@ func TestDotOpencodeDirectory(t *testing.T) {
 
 	info := cfg.Get()
 	if info.Model != "anthropic/claude-opus-4" {
-		t.Errorf("Expected Model from .opencode, got %s", info.Model)
+		t.Errorf("Expected Model from .magicode, got %s", info.Model)
 	}
 }

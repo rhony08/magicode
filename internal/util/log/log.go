@@ -87,7 +87,7 @@ func Init(levelStr string, print bool, logDir string) error {
 		// Use temp directory if no log dir specified
 		logDir = os.TempDir()
 	}
-	logFilePath = filepath.Join(logDir, "opencode.log")
+	logFilePath = filepath.Join(logDir, "magicode.log")
 
 	// Open log file
 	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

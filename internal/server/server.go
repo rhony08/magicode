@@ -1,4 +1,4 @@
-// Package server provides HTTP/WebSocket server for OpenCode.
+// Package server provides HTTP/WebSocket server for MagiCode.
 package server
 
 import (
@@ -69,7 +69,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// Server represents the OpenCode HTTP server.
+// Server represents the MagiCode HTTP server.
 type Server struct {
 	app       *fiber.App
 	config    Config
@@ -108,8 +108,8 @@ func New(directory string, cfg Config) *Server {
 
 	// Create Fiber app
 	s.app = fiber.New(fiber.Config{
-		AppName:               "OpenCode",
-		ServerHeader:          "OpenCode",
+		AppName:               "MagiCode",
+		ServerHeader:          "MagiCode",
 		DisableDefaultDate:    true,
 		DisableDefaultContentType: true,
 		BodyLimit:             50 * 1024 * 1024,

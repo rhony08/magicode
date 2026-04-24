@@ -76,7 +76,7 @@ func NewConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage configuration",
-		Long:  `View and manage OpenCode configuration.`,
+		Long:  `View and manage MagiCode configuration.`,
 	}
 
 	cmd.AddCommand(&cobra.Command{
@@ -153,7 +153,7 @@ func NewDebugCommand() *cobra.Command {
 		Use:   "version",
 		Short: "Show detailed version info",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("OpenCode CLI (Go)")
+			fmt.Println("MagiCode CLI (Go)")
 			fmt.Printf("Version: %s\n", cmd.Root().Version)
 			fmt.Println("Implementation: Phase 1 (Core Infrastructure)")
 			return nil
@@ -210,8 +210,8 @@ func NewImportCommand() *cobra.Command {
 func NewUpgradeCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upgrade",
-		Short: "Upgrade OpenCode",
-		Long:  `Upgrade OpenCode to the latest version.`,
+		Short: "Upgrade MagiCode",
+		Long:  `Upgrade MagiCode to the latest version.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("(Upgrade coming in Phase 9)")
 			return nil

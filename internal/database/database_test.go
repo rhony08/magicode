@@ -14,7 +14,7 @@ import (
 // TestDatabaseNew tests database initialization
 func TestDatabaseNew(t *testing.T) {
 	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "opencode-test-*")
+	tmpDir, err := os.MkdirTemp("", "magicode-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestDatabaseNew(t *testing.T) {
 
 // TestDatabaseMigrations tests that migrations run correctly
 func TestDatabaseMigrations(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "opencode-test-*")
+	tmpDir, err := os.MkdirTemp("", "magicode-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestDatabaseMigrations(t *testing.T) {
 
 // TestDatabaseExec tests query execution
 func TestDatabaseExec(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "opencode-test-*")
+	tmpDir, err := os.MkdirTemp("", "magicode-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestDatabaseExec(t *testing.T) {
 
 // TestDatabaseTransaction tests transaction handling
 func TestDatabaseTransaction(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "opencode-test-*")
+	tmpDir, err := os.MkdirTemp("", "magicode-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}

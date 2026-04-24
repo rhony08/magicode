@@ -87,7 +87,7 @@ func TestDatabasePath(t *testing.T) {
 	}
 
 	dbPath := DatabasePath()
-	expected := filepath.Join(tmpDir, "opencode.db")
+	expected := filepath.Join(tmpDir, "magicode.db")
 	if dbPath != expected {
 		t.Errorf("Expected DatabasePath=%s, got %s", expected, dbPath)
 	}
@@ -104,13 +104,13 @@ func TestConfigFile(t *testing.T) {
 
 	// Test default path when no config exists
 	configPath := ConfigFile()
-	expected := filepath.Join(tmpDir, "opencode.jsonc")
+	expected := filepath.Join(tmpDir, "magicode.jsonc")
 	if configPath != expected {
 		t.Errorf("Expected ConfigFile=%s, got %s", expected, configPath)
 	}
 
-	// Test with existing opencode.json
-	jsonPath := filepath.Join(tmpDir, "opencode.json")
+	// Test with existing magicode.json
+	jsonPath := filepath.Join(tmpDir, "magicode.json")
 	os.WriteFile(jsonPath, []byte("{}"), 0644)
 
 	configPath = ConfigFile()
@@ -129,7 +129,7 @@ func TestLogFile(t *testing.T) {
 	}
 
 	logPath := LogFile()
-	expected := filepath.Join(tmpDir, "opencode.log")
+	expected := filepath.Join(tmpDir, "magicode.log")
 	if logPath != expected {
 		t.Errorf("Expected LogFile=%s, got %s", expected, logPath)
 	}

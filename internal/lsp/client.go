@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opencode-ai/opencode-go/internal/util/log"
+	"github.com/rhony08/magicode/internal/util/log"
 )
 
 // Client represents an LSP client
@@ -110,7 +110,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 	params := InitializeParams{
 		ProcessID: nil,
 		ClientInfo: &ClientInfo{
-			Name:    "OpenCode",
+			Name:    "MagiCode",
 			Version: "1.0",
 		},
 		RootURI:  &rootURI,

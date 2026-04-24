@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/opencode-ai/opencode-go/internal/util/log"
+	"github.com/rhony08/magicode/internal/util/log"
 )
 
 // JSONRPCRequest represents a JSON-RPC request

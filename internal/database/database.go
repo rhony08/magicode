@@ -9,7 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/opencode-ai/opencode-go/internal/util/log"
+	"github.com/rhony08/magicode/internal/util/log"
 )
 
 // Database wraps the SQL database connection

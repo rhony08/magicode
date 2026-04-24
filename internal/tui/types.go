@@ -1,4 +1,4 @@
-// Package tui provides the terminal user interface for OpenCode.
+// Package tui provides the terminal user interface for MagiCode.
 package tui
 
 import (

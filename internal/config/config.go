@@ -106,7 +106,7 @@ func (s *Service) load() error {
 
 	// Load global config if directory specified
 	if s.globalDir != "" {
-		for _, file := range []string{"opencode.jsonc", "opencode.json", "config.json"} {
+		for _, file := range []string{"magicode.jsonc", "magicode.json", "config.json"} {
 			path := filepath.Join(s.globalDir, file)
 			if _, err := os.Stat(path); err == nil {
 				if err := s.loadFile(path); err != nil {
@@ -119,26 +119,26 @@ func (s *Service) load() error {
 
 	// Load project config if directory specified
 	if s.directory != "" {
-		projectConfig := filepath.Join(s.directory, "opencode.json")
+		projectConfig := filepath.Join(s.directory, "magicode.json")
 		if _, err := os.Stat(projectConfig); err == nil {
 			if err := s.loadFile(projectConfig); err != nil {
 				return err
 			}
 		}
 
-		// Also check opencode.jsonc
-		projectConfigC := filepath.Join(s.directory, "opencode.jsonc")
+		// Also check magicode.jsonc
+		projectConfigC := filepath.Join(s.directory, "magicode.jsonc")
 		if _, err := os.Stat(projectConfigC); err == nil {
 			if err := s.loadFile(projectConfigC); err != nil {
 				return err
 			}
 		}
 
-		// Check .opencode directory
-		opencodeDir := filepath.Join(s.directory, ".opencode")
-		if stat, err := os.Stat(opencodeDir); err == nil && stat.IsDir() {
-			for _, file := range []string{"opencode.json", "opencode.jsonc"} {
-				path := filepath.Join(opencodeDir, file)
+		// Check .magicode directory
+		magicodeDir := filepath.Join(s.directory, ".magicode")
+		if stat, err := os.Stat(magicodeDir); err == nil && stat.IsDir() {
+			for _, file := range []string{"magicode.json", "magicode.jsonc"} {
+				path := filepath.Join(magicodeDir, file)
 				if _, err := os.Stat(path); err == nil {
 					if err := s.loadFile(path); err != nil {
 						return err

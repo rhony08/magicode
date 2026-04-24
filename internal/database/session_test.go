@@ -11,7 +11,7 @@ import (
 
 // setupTestDB creates a test database
 func setupTestDB(t *testing.T) (*Database, func()) {
-	tmpDir, err := os.MkdirTemp("", "opencode-session-test-*")
+	tmpDir, err := os.MkdirTemp("", "magicode-session-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}

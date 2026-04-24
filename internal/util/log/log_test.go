@@ -223,8 +223,8 @@ func TestInit(t *testing.T) {
 
 	// Check log file path
 	logPath := File()
-	if !strings.Contains(logPath, "opencode.log") {
-		t.Errorf("Expected log path to contain opencode.log, got %s", logPath)
+	if !strings.Contains(logPath, "magicode.log") {
+		t.Errorf("Expected log path to contain magicode.log, got %s", logPath)
 	}
 
 	// Close the log file

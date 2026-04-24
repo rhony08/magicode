@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opencode-ai/opencode-go/internal/util/log"
+	"github.com/rhony08/magicode/internal/util/log"
 )
 
 // AnthropicProvider implements Provider for Anthropic API

@@ -1,5 +1,5 @@
 // Package database provides SQLite database operations with schema definitions
-// compatible with the TypeScript version of OpenCode.
+// compatible with the TypeScript version of MagiCode.
 package database
 
 import (

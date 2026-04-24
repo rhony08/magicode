@@ -5,10 +5,10 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/opencode-ai/opencode-go/internal/config"
-	"github.com/opencode-ai/opencode-go/internal/global"
-	"github.com/opencode-ai/opencode-go/internal/tui"
-	"github.com/opencode-ai/opencode-go/internal/util/log"
+	"github.com/rhony08/magicode/internal/config"
+	"github.com/rhony08/magicode/internal/global"
+	"github.com/rhony08/magicode/internal/tui"
+	"github.com/rhony08/magicode/internal/util/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -16,9 +16,9 @@ import (
 // NewRootCommand creates the root CLI command
 func NewRootCommand(version string) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "opencode",
+		Use:   "magicode",
 		Short: "AI-powered coding assistant CLI",
-		Long: `OpenCode is an AI-powered coding assistant that helps you write,
+		Long: `MagiCode is an AI-powered coding assistant that helps you write,
 edit, and understand code. It integrates with multiple AI providers
 and provides tools for file operations, code search, and more.
 
@@ -95,7 +95,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create TUI app configuration with title showing model info
 	tuiConfig := tui.Config{
-		Title: fmt.Sprintf("OpenCode - %s", cfg.Model()),
+		Title: fmt.Sprintf("MagiCode - %s", cfg.Model()),
 	}
 
 	// Create the TUI app

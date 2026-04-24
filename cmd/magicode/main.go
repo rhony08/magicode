@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/opencode-ai/opencode-go/cmd/opencode/commands"
+	"github.com/rhony08/magicode/cmd/magicode/commands"
 )
 
 var (

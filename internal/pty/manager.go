@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/opencode-ai/opencode-go/internal/bus"
+	"github.com/rhony08/magicode/internal/bus"
 )
 
 // Manager manages PTY sessions with bounded limits and buffer pooling.

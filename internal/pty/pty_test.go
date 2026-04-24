@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opencode-ai/opencode-go/internal/bus"
+	"github.com/rhony08/magicode/internal/bus"
 )
 
 // MockProcess is a mock PTY process for testing

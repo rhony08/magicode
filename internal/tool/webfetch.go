@@ -126,7 +126,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, params map[string]interface{
 	}
 
 	// Set headers
-	req.Header.Set("User-Agent", "OpenCode/1.0")
+	req.Header.Set("User-Agent", "MagiCode/1.0")
 	req.Header.Set("Accept", "text/html, application/json, text/plain, */*")
 
 	// Execute request

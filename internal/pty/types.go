@@ -1,4 +1,4 @@
-// Package pty provides pseudo-terminal management for OpenCode.
+// Package pty provides pseudo-terminal management for MagiCode.
 package pty
 
 import (

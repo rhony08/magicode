@@ -232,9 +232,9 @@ func (a *App) View() string {
 
 // renderTitle renders the title bar
 func (a *App) renderTitle() string {
-	title := "OpenCode"
+	title := "MagiCode"
 	if a.activeSession != nil {
-		title = fmt.Sprintf("OpenCode - %s", a.activeSession.Title)
+		title = fmt.Sprintf("MagiCode - %s", a.activeSession.Title)
 	}
 	return styleTitle.Render(title)
 }

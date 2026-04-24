@@ -1,4 +1,4 @@
-// Package provider provides AI provider abstraction for OpenCode.
+// Package provider provides AI provider abstraction for MagiCode.
 package provider
 
 // ProviderID is a unique identifier for a provider

@@ -8,7 +8,7 @@ import (
 
 	"github.com/fasthttp/websocket"
 	"github.com/gofiber/fiber/v2"
-	"github.com/opencode-ai/opencode-go/internal/pty"
+	"github.com/rhony08/magicode/internal/pty"
 	"github.com/valyala/fasthttp"
 )
 

@@ -10,32 +10,28 @@ import (
 // Paths contains global application paths
 type Paths struct {
 	Data   string // Data directory (sessions, database)
-	Config string // Config directory (opencode.json)
-	State  string // State directory (logs, temp files)
+	Config string // Config directory (magicode.json)
+	State  string // State directory (logs)
 	Cache  string // Cache directory
 }
 
-var (
-	// Path holds the initialized global paths
-	Path Paths
+// Path is the global path instance
+var Path Paths
 
-	// initialized tracks if Init was called
-	initialized bool
-)
+// initialized tracks whether Init has been called
+var initialized bool
 
-// Init initializes global paths based on XDG standards
+// Init initializes global paths using XDG standards
+// Data: ~/.local/share/magicode (or $XDG_DATA_HOME/magicode)
+// Config: ~/.config/magicode (or $XDG_CONFIG_HOME/magicode)
+// State: ~/.local/state/magicode (or $XDG_STATE_HOME/magicode)
+// Cache: ~/.cache/magicode (or $XDG_CACHE_HOME/magicode)
 func Init() error {
 	if initialized {
 		return nil
 	}
 
-	// Use XDG Base Directory Specification
-	// Data: ~/.local/share/opencode (or $XDG_DATA_HOME/opencode)
-	// Config: ~/.config/opencode (or $XDG_CONFIG_HOME/opencode)
-	// State: ~/.local/state/opencode (or $XDG_STATE_HOME/opencode)
-	// Cache: ~/.cache/opencode (or $XDG_CACHE_HOME/opencode)
-
-	appName := "opencode"
+	appName := "magicode"
 
 	Path = Paths{
 		Data:   filepath.Join(xdg.DataHome, appName),
@@ -90,15 +86,15 @@ func IsInitialized() bool {
 
 // DatabasePath returns the path to the SQLite database
 func DatabasePath() string {
-	return filepath.Join(Path.Data, "opencode.db")
+	return filepath.Join(Path.Data, "magicode.db")
 }
 
 // ConfigFile returns the path to the main config file
 func ConfigFile() string {
 	// Check for existing config files in order of preference
 	candidates := []string{
-		filepath.Join(Path.Config, "opencode.jsonc"),
-		filepath.Join(Path.Config, "opencode.json"),
+		filepath.Join(Path.Config, "magicode.jsonc"),
+		filepath.Join(Path.Config, "magicode.json"),
 		filepath.Join(Path.Config, "config.json"),
 	}
 
@@ -108,13 +104,13 @@ func ConfigFile() string {
 		}
 	}
 
-	// Default to opencode.jsonc
-	return filepath.Join(Path.Config, "opencode.jsonc")
+	// Default to magicode.jsonc
+	return filepath.Join(Path.Config, "magicode.jsonc")
 }
 
 // LogFile returns the path to the log file
 func LogFile() string {
-	return filepath.Join(Path.State, "opencode.log")
+	return filepath.Join(Path.State, "magicode.log")
 }
 
 // PlansPath returns the path for storing plan files
