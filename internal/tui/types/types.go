@@ -153,6 +153,9 @@ type Provider struct {
 	Name      string           `json:"name"`
 	Connected bool             `json:"connected"`
 	Models    map[string]Model `json:"models"`
+	NPM       string           `json:"npm,omitempty"`      // OpenCode: npm package
+	BaseURL   string           `json:"base_url,omitempty"` // OpenCode: base URL
+	APIKey    string           `json:"api_key,omitempty"`  // OpenCode: API key
 }
 
 // Model represents an AI model
@@ -161,16 +164,47 @@ type Model struct {
 	Name       string            `json:"name"`
 	ProviderID string            `json:"provider_id"`
 	Variants   map[string]string `json:"variants,omitempty"`
+	Modalities ModelModalities   `json:"modalities,omitempty"` // OpenCode: input/output types
+	Options    ModelOptions      `json:"options,omitempty"`    // OpenCode: model options
+	Limit      ModelLimit        `json:"limit,omitempty"`      // OpenCode: context/output limits
+}
+
+// ModelModalities represents input/output modalities (OpenCode)
+type ModelModalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
+}
+
+// ModelOptions represents model-specific options (OpenCode)
+type ModelOptions struct {
+	Thinking *ModelThinkingOptions `json:"thinking,omitempty"`
+}
+
+// ModelThinkingOptions represents thinking options (OpenCode)
+type ModelThinkingOptions struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
+// ModelLimit represents model limits (OpenCode)
+type ModelLimit struct {
+	Context int `json:"context"`
+	Output  int `json:"output"`
 }
 
 // Agent represents an agent type
 type Agent struct {
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Model       *ModelKey `json:"model,omitempty"`
-	Variant     string    `json:"variant,omitempty"`
-	Mode        string    `json:"mode"` // "build", etc.
-	Hidden      bool      `json:"hidden"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Model       *ModelKey              `json:"model,omitempty"`
+	Variant     string                 `json:"variant,omitempty"`
+	Mode        string                 `json:"mode"` // "build", etc.
+	Hidden      bool                   `json:"hidden"`
+	Color       string                 `json:"color,omitempty"`       // OpenCode: hex color
+	Temperature float64                `json:"temperature,omitempty"` // OpenCode: temperature
+	Tools       map[string]bool        `json:"tools,omitempty"`       // OpenCode: enabled tools
+	Permission  map[string]interface{} `json:"permission,omitempty"`  // OpenCode: tool permissions
+	Content     string                 `json:"content,omitempty"`     // OpenCode: full prompt content
 }
 
 // ModelKey identifies a model by provider and ID
@@ -349,6 +383,12 @@ type LocalStore struct {
 	CurrentAgent string   `json:"current_agent"`
 	CurrentModel ModelKey `json:"current_model"`
 	ModelVariant string   `json:"model_variant"` // Optional model variant
+
+	// Available agents (populated from OpenCode config)
+	Agents []Agent `json:"agents,omitempty"`
+
+	// Available providers (populated from OpenCode config)
+	Providers []Provider `json:"providers,omitempty"`
 
 	// Per-session selections (sessionID -> State)
 	SessionState map[string]SessionLocalState `json:"session_state"`
@@ -722,6 +762,118 @@ func (s *AppState) SetCurrentAgent(agent string) {
 		state.Agent = agent
 		s.Local.SessionState[s.SessionID] = state
 	}
+}
+
+// CycleAgent cycles to the next or previous agent
+// direction: 1 for next, -1 for previous
+func (s *AppState) CycleAgent(direction int) {
+	if len(s.Local.Agents) == 0 {
+		return
+	}
+
+	// Find current agent index
+	currentIdx := -1
+	for i, agent := range s.Local.Agents {
+		if agent.Name == s.Local.CurrentAgent {
+			currentIdx = i
+			break
+		}
+	}
+
+	// Calculate next index with wrapping
+	nextIdx := currentIdx + direction
+	if nextIdx < 0 {
+		nextIdx = len(s.Local.Agents) - 1
+	} else if nextIdx >= len(s.Local.Agents) {
+		nextIdx = 0
+	}
+
+	s.SetCurrentAgent(s.Local.Agents[nextIdx].Name)
+}
+
+// CycleModel cycles to the next or previous model
+// direction: 1 for next, -1 for previous
+func (s *AppState) CycleModel(direction int) {
+	// Get all available models from providers
+	var allModels []ModelKey
+	for _, provider := range s.Local.Providers {
+		for _, model := range provider.Models {
+			allModels = append(allModels, ModelKey{
+				ProviderID: provider.ID,
+				ModelID:    model.ID,
+			})
+		}
+	}
+
+	if len(allModels) == 0 {
+		return
+	}
+
+	// Find current model index
+	currentIdx := -1
+	for i, model := range allModels {
+		if model.ProviderID == s.Local.CurrentModel.ProviderID &&
+			model.ModelID == s.Local.CurrentModel.ModelID {
+			currentIdx = i
+			break
+		}
+	}
+
+	// Calculate next index with wrapping
+	nextIdx := currentIdx + direction
+	if nextIdx < 0 {
+		nextIdx = len(allModels) - 1
+	} else if nextIdx >= len(allModels) {
+		nextIdx = 0
+	}
+
+	s.SetCurrentModel(allModels[nextIdx])
+}
+
+// IsModelValid checks if a model reference is valid (exists in providers)
+func (s *AppState) IsModelValid(model ModelKey) bool {
+	for _, provider := range s.Local.Providers {
+		if provider.ID == model.ProviderID {
+			for _, m := range provider.Models {
+				if m.ID == model.ModelID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// GetAgent returns an agent by name
+func (s *AppState) GetAgent(name string) *Agent {
+	for i := range s.Local.Agents {
+		if s.Local.Agents[i].Name == name {
+			return &s.Local.Agents[i]
+		}
+	}
+	return nil
+}
+
+// GetCurrentAgent returns the currently selected agent
+func (s *AppState) GetCurrentAgent() *Agent {
+	if s.Local.CurrentAgent == "" && len(s.Local.Agents) > 0 {
+		// Return first non-hidden agent if none selected
+		for i := range s.Local.Agents {
+			if !s.Local.Agents[i].Hidden {
+				return &s.Local.Agents[i]
+			}
+		}
+	}
+	return s.GetAgent(s.Local.CurrentAgent)
+}
+
+// GetAgentColor returns the color for an agent (or default if not set)
+func (s *AppState) GetAgentColor(name string) string {
+	agent := s.GetAgent(name)
+	if agent != nil && agent.Color != "" {
+		return agent.Color
+	}
+	return "#7C3AED" // Default purple color
 }
 
 // AddMessage appends a message to the message list
