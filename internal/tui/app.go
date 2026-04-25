@@ -672,8 +672,12 @@ func (a *App) renderToolCall(tc *ToolCall) string {
 
 // handleKey handles keyboard input
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Debug: Log entry into handleKey
+	log.Info("handleKey called", "key", msg.String(), "hasActiveDialog", a.activeDialog != nil, "hasDialogStack", a.state.Dialog.HasOpen())
+
 	// If active dialog is open, route keys to it
 	if a.activeDialog != nil {
+		log.Info("Routing to activeDialog")
 		var cmd tea.Cmd
 		a.activeDialog, cmd = a.activeDialog.Update(msg)
 		return a, cmd
@@ -890,11 +894,13 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Pass to input if in input mode and not a control key
 	// This handles regular typing
+	log.Info("Reached input section", "mode", a.mode, "isModeInput", a.mode == ModeInput)
 	if a.mode == ModeInput {
-		log.Info("Passing to input", "mode", a.mode, "keyType", msg.Type)
+		log.Info("Mode is Input, checking key type", "keyType", msg.Type, "hasRunes", msg.Runes != nil && len(msg.Runes) > 0)
 		// Only pass printable characters and essential editing keys to input
 		switch msg.Type {
 		case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyLeft, tea.KeyRight:
+			log.Info("Key type matches, updating input")
 			var cmd tea.Cmd
 			a.input, cmd = a.input.Update(msg)
 			log.Info("Input updated", "newValue", a.input.Value())
@@ -902,16 +908,18 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Also handle keys with runes
 		if msg.Runes != nil && len(msg.Runes) > 0 {
+			log.Info("Key has runes, updating input")
 			var cmd tea.Cmd
 			a.input, cmd = a.input.Update(msg)
 			log.Info("Input updated (via runes)", "newValue", a.input.Value())
 			return a, cmd
 		}
-		log.Info("Key not handled by input")
+		log.Info("Key did not match input criteria")
 	} else {
 		log.Info("Not in input mode", "mode", a.mode)
 	}
 
+	log.Info("Key not handled, returning")
 	return a, nil
 }
 

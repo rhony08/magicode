@@ -3,6 +3,7 @@
 package dialog
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -106,7 +107,11 @@ func (d *CommandPaletteDialog) Init() tea.Cmd {
 func (d *CommandPaletteDialog) Update(msg tea.Msg) (Dialog, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Debug logging
+		fmt.Printf("[CommandPalette] Key received: %s (type: %v)\n", msg.String(), msg.Type)
+
 		handled, cmd := d.HandleKey(msg)
+		fmt.Printf("[CommandPalette] HandleKey returned: handled=%v\n", handled)
 		if handled {
 			// Re-filter after search change
 			d.filterCommands()
@@ -127,6 +132,8 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (Dialog, tea.Cmd) {
 				},
 			)
 		}
+
+		fmt.Printf("[CommandPalette] Key not handled: %s\n", msg.String())
 
 	case tea.WindowSizeMsg:
 		d.SetDimensions(msg.Width, msg.Height)
