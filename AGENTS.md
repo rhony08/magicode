@@ -108,12 +108,13 @@ internal/tui/
 - ✅ Phase 3.2: DialogSessionList - Searchable session selection with fuzzy filter
 - ✅ Phase 3.3: DialogModelList - Model selection grouped by provider
 - ✅ Phase 3.4: DialogHelp - Keyboard shortcuts organized by category
+- ✅ Phase 4.1: Leader Key System - Ctrl+X prefix with 2s timeout
+- ✅ Phase 4.2: Keybind Registry - All leader actions mapped (l, n, m, a, etc.)
 
 ### In Progress
-- None (Phase 3 complete)
+- None (Phase 4 complete)
 
 ### Pending
-- ⏳ Phase 4: Leader Key System (Ctrl+X prefix handling)
 - ⏳ Phase 5: Theme Persistence (save to KVStore, theme dialog)
 - ⏳ Phase 6: Advanced Features (tool result rendering, markdown, undo/redo)
 - ⏳ Phase 7: Polish (animations, sound, clipboard)
@@ -173,6 +174,41 @@ if a.atTopOfMessages() && a.state.HistoryMore(sessionID) {
     return a, a.loadMoreMessages() // loads 200 more with cursor
 }
 ```
+
+### Leader Key System
+
+OpenCode uses **Ctrl+X** as the leader key prefix for most commands:
+
+```
+Ctrl+X + Key = Action
+Ctrl+X + l    Session list
+Ctrl+X + n    New session
+Ctrl+X + m    Model list
+Ctrl+X + b    Toggle sidebar
+Ctrl+X + h    Help dialog
+Ctrl+X + q    Exit app
+```
+
+**Implementation:** `internal/tui/leader.go`
+
+- `LeaderKeyHandler` manages state (None, Active, Complete)
+- `LeaderTimeout = 2000ms` (2 second timeout)
+- `HandleKey()` checks for Ctrl+X first, then buffers second key
+- `processSecondKey()` maps keys to LeaderKeyMsg actions
+- `handleLeaderAction()` in app.go processes actions
+
+**Timeout handling:**
+- `LeaderTimeoutMsg` sent when timeout expires
+- Automatically resets leader state
+- User can press Escape to cancel leader sequence
+
+**Actions implemented:**
+- Session: l, n, x, c, g (list, new, export, compact, timeline)
+- Navigation: b (sidebar toggle)
+- Model/Agent: m, a (model list, agent list)
+- Messages: y, u, r (copy, undo, redo)
+- System: t, s, h (theme, status, help)
+- Exit: q (quit app)
 
 ## Debugging
 
