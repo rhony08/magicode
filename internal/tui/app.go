@@ -40,6 +40,9 @@ type App struct {
 	// Active dialog (if any)
 	activeDialog dialog.Dialog
 
+	// Leader key handler
+	leaderHandler *LeaderKeyHandler
+
 	// Legacy components (kept for compatibility)
 	input           textinput.Model
 	spinner         spinner.Model
@@ -141,6 +144,7 @@ func NewApp(cfg Config) *App {
 		statusBar:       statusBar,
 		prompt:          prompt,
 		keybindHints:    keybindHints,
+		leaderHandler:   NewLeaderKeyHandler(),
 		input:           ti,
 		spinner:         s,
 		messageViewport: vp,
@@ -278,6 +282,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.state.ShowError = false
 			a.state.LastError = nil
 		}
+
+	// Leader timeout - reset leader state
+	case LeaderTimeoutMsg:
+		// Leader key timeout expired, state is automatically reset
 
 	// Theme change message
 	case ThemeChangeMsg:
@@ -757,6 +765,18 @@ func (a *App) handleDialogSelect(dialog *DialogState) (tea.Model, tea.Cmd) {
 func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	kb := a.keybindings
 
+	// Check for leader key first (Ctrl+X)
+	// This must be checked before any other keybindings
+	handled, cmd, leaderMsg := a.leaderHandler.HandleKey(msg)
+	if handled {
+		// If we got a leader action, handle it
+		if leaderMsg != nil {
+			return a.handleLeaderAction(leaderMsg)
+		}
+		// Otherwise, just return (e.g., waiting for second key or timeout)
+		return a, cmd
+	}
+
 	switch {
 	case kb.Submit.Match(msg):
 		return a.submitInput()
@@ -766,11 +786,7 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case kb.Help.Match(msg):
-		a.showHelp = !a.showHelp
-		if a.showHelp {
-			a.view = ViewHelp
-		}
-		return a, nil
+		return a, a.showHelpDialog()
 
 	case kb.NewSession.Match(msg):
 		return a, a.createSession()
@@ -1263,6 +1279,82 @@ func convertPartsToTUI(parts []database.Part) []Part {
 		result = append(result, tuiPart)
 	}
 	return result
+}
+
+// ===========================================
+// Leader Key Methods
+// ===========================================
+
+// handleLeaderAction handles leader key actions
+func (a *App) handleLeaderAction(msg *LeaderKeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Action {
+	case "session_list":
+		return a, a.showSessionListDialog()
+
+	case "session_new":
+		return a, a.createSession()
+
+	case "session_export":
+		// TODO: Implement session export
+		a.state.SetStatus("Session export: Not yet implemented")
+		return a, nil
+
+	case "session_compact":
+		// TODO: Implement session compact
+		a.state.SetStatus("Session compact: Not yet implemented")
+		return a, nil
+
+	case "session_timeline":
+		// TODO: Implement session timeline
+		a.state.SetStatus("Session timeline: Not yet implemented")
+		return a, nil
+
+	case "sidebar_toggle":
+		a.state.ToggleSidebar()
+		return a, nil
+
+	case "model_list":
+		return a, a.showModelListDialog()
+
+	case "agent_list":
+		// TODO: Implement agent list
+		a.state.SetStatus("Agent list: Not yet implemented")
+		return a, nil
+
+	case "message_copy":
+		// TODO: Implement message copy
+		a.state.SetStatus("Copy message: Not yet implemented")
+		return a, nil
+
+	case "message_undo":
+		// TODO: Implement message undo
+		a.state.SetStatus("Undo: Not yet implemented")
+		return a, nil
+
+	case "message_redo":
+		// TODO: Implement message redo
+		a.state.SetStatus("Redo: Not yet implemented")
+		return a, nil
+
+	case "theme_list":
+		// TODO: Implement theme list
+		a.state.SetStatus("Theme list: Not yet implemented")
+		return a, nil
+
+	case "status_view":
+		// TODO: Implement status view
+		a.state.SetStatus("Status view: Not yet implemented")
+		return a, nil
+
+	case "help_dialog":
+		return a, a.showHelpDialog()
+
+	case "exit_app":
+		return a, tea.Quit
+
+	default:
+		return a, nil
+	}
 }
 
 // ===========================================
