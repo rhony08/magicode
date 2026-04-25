@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
 	"github.com/rhony08/magicode/internal/database"
+	"github.com/rhony08/magicode/internal/opencode"
 	"github.com/rhony08/magicode/internal/tui/dialog"
 	"github.com/rhony08/magicode/internal/tui/layout"
 	"github.com/rhony08/magicode/internal/util/log"
@@ -1043,88 +1044,76 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 	}
 }
 
-// loadSessionsFromDB loads sessions from the database
+// loadSessionsFromDB loads sessions from the database and optionally from file-based storage
 func (a *App) loadSessionsFromDB() tea.Cmd {
 	return func() tea.Msg {
+		var allSessions []Session
+
 		// Log the database path being used
 		log.Info("Loading sessions from database", "path", a.databasePath)
 
 		// Check if database file exists
-		if _, err := os.Stat(a.databasePath); os.IsNotExist(err) {
-			log.Warn("Database file does not exist", "path", a.databasePath)
-			return nil
-		}
+		if _, err := os.Stat(a.databasePath); err == nil {
+			// Load from SQLite
+			ctx := context.Background()
+			db, err := database.New(ctx, database.Config{Path: a.databasePath})
+			if err != nil {
+				log.Error("Failed to open database for loading sessions", "error", err.Error(), "path", a.databasePath)
+			} else {
+				defer db.Close()
 
-		ctx := context.Background()
-		db, err := database.New(ctx, database.Config{Path: a.databasePath})
-		if err != nil {
-			log.Error("Failed to open database for loading sessions", "error", err.Error(), "path", a.databasePath)
-			return nil
-		}
-		defer db.Close()
+				sessionStorage := database.NewSessionStorage(db)
+				dbSessions, err := sessionStorage.ListAll(ctx)
+				if err != nil {
+					log.Error("Failed to load sessions from database", "error", err.Error())
+				} else {
+					log.Info("Retrieved sessions from SQLite database", "count", len(dbSessions))
 
-		sessionStorage := database.NewSessionStorage(db)
-
-		// Load sessions from database (all sessions, not filtered by directory)
-		dbSessions, err := sessionStorage.ListAll(ctx)
-		if err != nil {
-			log.Error("Failed to load sessions from database", "error", err.Error())
-			return nil
-		}
-
-		log.Info("Retrieved sessions from database", "count", len(dbSessions))
-
-		// Convert database sessions to TUI sessions
-		var sessions []Session
-		for _, dbSession := range dbSessions {
-			sessions = append(sessions, Session{
-				ID:        dbSession.ID,
-				Title:     dbSession.Title,
-				Directory: dbSession.Directory,
-				CreatedAt: time.UnixMilli(dbSession.Timestamps.TimeCreated),
-				Active:    false, // Will be set by SetActiveSession if needed
-			})
-		}
-
-		log.Info("Loaded sessions from database", "count", len(sessions))
-
-		// Check for old OpenCode file-based storage
-		if len(sessions) == 0 {
-			a.checkForFileBasedStorage()
-		}
-
-		// Update state with loaded sessions
-		a.state.Sync.Sessions = sessions
-		return nil
-	}
-}
-
-// checkForFileBasedStorage checks if old OpenCode v1.2 file-based storage exists
-func (a *App) checkForFileBasedStorage() {
-	// Get the data directory from database path
-	dataDir := filepath.Dir(a.databasePath)
-	storageDir := filepath.Join(dataDir, "storage", "session")
-
-	if _, err := os.Stat(storageDir); err == nil {
-		// Directory exists, count session directories
-		entries, err := os.ReadDir(storageDir)
-		if err == nil && len(entries) > 0 {
-			// Count actual session directories (excluding "global")
-			sessionCount := 0
-			for _, entry := range entries {
-				if entry.IsDir() && entry.Name() != "global" {
-					sessionCount++
+					for _, dbSession := range dbSessions {
+						allSessions = append(allSessions, Session{
+							ID:        dbSession.ID,
+							Title:     dbSession.Title,
+							Directory: dbSession.Directory,
+							CreatedAt: time.UnixMilli(dbSession.Timestamps.TimeCreated),
+							Active:    false,
+						})
+					}
 				}
 			}
+		} else {
+			log.Info("Database file does not exist, skipping SQLite load", "path", a.databasePath)
+		}
 
-			if sessionCount > 0 {
-				log.Warn("Found OpenCode v1.2 file-based storage", "path", storageDir, "count", sessionCount)
-				log.Warn("These sessions are not compatible with the current SQLite format")
-				log.Warn("OpenCode v1.2 uses file-based storage, v1.3+ uses SQLite")
-				log.Warn("Use 'magicode migrate' to import old sessions (coming soon)")
-				a.state.SetStatus(fmt.Sprintf("Found %d sessions in old format (use 'magicode migrate')", sessionCount))
+		// Also check for file-based storage (OpenCode v1.2)
+		dataDir := filepath.Dir(a.databasePath)
+		log.Info("Checking for file-based storage", "dataDir", dataDir)
+		fileStorage := opencode.NewFileStorage(dataDir)
+		if fileStorage.HasFileStorage() {
+			log.Info("File-based storage detected, loading sessions")
+			fileSessions, err := fileStorage.ListSessions()
+			if err != nil {
+				log.Warn("Failed to load file-based sessions", "error", err.Error())
+			} else {
+				log.Info("Retrieved sessions from file-based storage", "count", len(fileSessions))
+
+				for _, fs := range fileSessions {
+					id, title, directory, createdAt := fs.ToTUISession()
+					allSessions = append(allSessions, Session{
+						ID:        id,
+						Title:     "[Old] " + title,
+						Directory: directory,
+						CreatedAt: createdAt,
+						Active:    false,
+					})
+				}
 			}
 		}
+
+		log.Info("Total sessions loaded", "count", len(allSessions))
+
+		// Update state with loaded sessions
+		a.state.Sync.Sessions = allSessions
+		return nil
 	}
 }
 

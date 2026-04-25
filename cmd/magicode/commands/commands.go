@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/rhony08/magicode/internal/config"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/global"
+	"github.com/rhony08/magicode/internal/opencode"
 	"github.com/rhony08/magicode/internal/provider"
 	"github.com/rhony08/magicode/internal/server"
 	"github.com/rhony08/magicode/internal/util/log"
@@ -140,6 +142,27 @@ func NewSessionCommand() *cobra.Command {
 				sessions, err = sessionStorage.ListAll(ctx)
 				if err != nil {
 					return fmt.Errorf("failed to list sessions: %w", err)
+				}
+
+				// Also check for file-based storage (OpenCode v1.2)
+				dataDir := filepath.Dir(dbPath)
+				fileStorage := opencode.NewFileStorage(dataDir)
+				if fileStorage.HasFileStorage() {
+					fileSessions, err := fileStorage.ListSessions()
+					if err == nil && len(fileSessions) > 0 {
+						// Convert file sessions to database sessions
+						for _, fs := range fileSessions {
+							id, title, directory, createdAt := fs.ToTUISession()
+							sessions = append(sessions, database.Session{
+								ID:        id,
+								Title:     "[Old] " + title,
+								Directory: directory,
+								Timestamps: database.Timestamps{
+									TimeCreated: createdAt.UnixMilli(),
+								},
+							})
+						}
+					}
 				}
 			} else {
 				// List sessions for current directory only
