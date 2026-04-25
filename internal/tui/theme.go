@@ -636,6 +636,15 @@ func GetAllThemes() map[string]Theme {
 	return globalThemeRegistry.themes
 }
 
+// ListThemes returns all themes as a slice
+func (r *ThemeRegistry) ListThemes() []Theme {
+	themes := make([]Theme, 0, len(r.themes))
+	for _, theme := range r.themes {
+		themes = append(themes, theme)
+	}
+	return themes
+}
+
 // ThemeNames returns a list of theme names
 func ThemeNames() []string {
 	return globalThemeRegistry.List()
