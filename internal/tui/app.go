@@ -812,10 +812,14 @@ func (a *App) handleDialogSelect(dialog *DialogState) (tea.Model, tea.Cmd) {
 func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	kb := a.keybindings
 
+	// Debug: Log key press
+	log.Info("Key pressed", "key", msg.String(), "type", msg.Type, "runes", msg.Runes, "mode", a.mode)
+
 	// Check for leader key first (Ctrl+X)
 	// This must be checked before any other keybindings
 	handled, cmd, leaderMsg := a.leaderHandler.HandleKey(msg)
 	if handled {
+		log.Info("Leader handler consumed key")
 		// If we got a leader action, handle it
 		if leaderMsg != nil {
 			return a.handleLeaderAction(leaderMsg)
@@ -826,16 +830,20 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case kb.Submit.Match(msg):
+		log.Info("Submit matched")
 		return a.submitInput()
 
 	case kb.Sessions.Match(msg):
+		log.Info("Sessions matched")
 		a.view = ViewSession
 		return a, nil
 
 	case kb.Help.Match(msg):
+		log.Info("Help matched")
 		return a, a.showHelpDialog()
 
 	case kb.NewSession.Match(msg):
+		log.Info("NewSession matched")
 		return a, a.createSession()
 
 	case kb.Up.Match(msg):
@@ -880,11 +888,28 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.showCommandPaletteDialog()
 	}
 
-	// Pass to input if in input mode
+	// Pass to input if in input mode and not a control key
+	// This handles regular typing
 	if a.mode == ModeInput {
-		var cmd tea.Cmd
-		a.input, cmd = a.input.Update(msg)
-		return a, cmd
+		log.Info("Passing to input", "mode", a.mode, "keyType", msg.Type)
+		// Only pass printable characters and essential editing keys to input
+		switch msg.Type {
+		case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyLeft, tea.KeyRight:
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg)
+			log.Info("Input updated", "newValue", a.input.Value())
+			return a, cmd
+		}
+		// Also handle keys with runes
+		if msg.Runes != nil && len(msg.Runes) > 0 {
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg)
+			log.Info("Input updated (via runes)", "newValue", a.input.Value())
+			return a, cmd
+		}
+		log.Info("Key not handled by input")
+	} else {
+		log.Info("Not in input mode", "mode", a.mode)
 	}
 
 	return a, nil
