@@ -1,5 +1,5 @@
 // Package dialog provides modal dialog components for the TUI.
-// This file implements the theme selection dialog.
+// This file implements the theme list dialog for theme selection.
 package dialog
 
 import (
@@ -11,41 +11,62 @@ import (
 	"github.com/rhony08/magicode/internal/tui/types"
 )
 
-// ThemeListDialog shows a list of available themes
+// ThemeListDialog shows a list of available themes for selection
 type ThemeListDialog struct {
 	BaseDialog
 
-	// Available themes
-	themes []types.Theme
+	// Themes to display
+	themes []ThemeItem
 
-	// State reference
-	state *types.AppState
+	// Filtered themes based on search
+	filtered []ThemeItem
+
+	// Currently selected theme ID
+	currentTheme string
+}
+
+// ThemeItem represents a theme in the list
+type ThemeItem struct {
+	ID          string
+	Name        string
+	Description string
+	IsDark      bool
 }
 
 // NewThemeListDialog creates a new theme list dialog
-// The themes parameter should be obtained from the registry
-func NewThemeListDialog(theme types.Theme, state *types.AppState, themes []types.Theme) *ThemeListDialog {
+func NewThemeListDialog(theme types.Theme, state *types.AppState, availableThemes []types.Theme) *ThemeListDialog {
 	d := &ThemeListDialog{
 		BaseDialog: BaseDialog{
 			theme:    theme,
 			title:    "Select Theme",
-			action:   "",
+			action:   "Enter Select",
 			search:   "",
 			selected: 0,
 		},
-		state:  state,
-		themes: themes,
+		currentTheme: state.KV.Theme,
 	}
 
-	if d.themes == nil {
-		d.themes = []types.Theme{}
+	// Convert types.Theme to ThemeItem
+	d.themes = make([]ThemeItem, 0, len(availableThemes))
+	for _, t := range availableThemes {
+		description := "Dark theme"
+		if !t.IsDark {
+			description = "Light theme"
+		}
+		d.themes = append(d.themes, ThemeItem{
+			ID:          t.ID,
+			Name:        t.Name,
+			Description: description,
+			IsDark:      t.IsDark,
+		})
 	}
 
-	d.SetItemCount(len(d.themes))
+	d.filtered = d.themes
+	d.SetItemCount(len(d.filtered))
 
-	// Select current theme
-	for i, t := range d.themes {
-		if t.ID == state.KV.Theme {
+	// Set initial selection to current theme
+	for i, t := range d.filtered {
+		if t.ID == d.currentTheme {
 			d.selected = i
 			break
 		}
@@ -70,12 +91,14 @@ func (d *ThemeListDialog) Update(msg tea.Msg) (Dialog, tea.Cmd) {
 	case tea.KeyMsg:
 		handled, cmd := d.HandleKey(msg)
 		if handled {
+			// Re-filter after search change
 			d.filterThemes()
 			return d, cmd
 		}
 
-		if msg.String() == "enter" && len(d.themes) > 0 {
-			selected := d.themes[d.Selected()]
+		if msg.String() == "enter" && len(d.filtered) > 0 {
+			// Select the theme
+			selected := d.filtered[d.Selected()]
 			return d, tea.Batch(
 				CloseCmd(),
 				func() tea.Msg {
@@ -88,6 +111,26 @@ func (d *ThemeListDialog) Update(msg tea.Msg) (Dialog, tea.Cmd) {
 			)
 		}
 
+		// Number keys 1-8 for quick selection
+		key := msg.String()
+		if len(key) == 1 && key >= "1" && key <= "8" {
+			index := int(key[0] - '1')
+			if index < len(d.filtered) {
+				d.selected = index
+				selected := d.filtered[index]
+				return d, tea.Batch(
+					CloseCmd(),
+					func() tea.Msg {
+						return SelectMsg{
+							Type:  types.DialogThemeList,
+							Index: index,
+							Data:  selected.ID,
+						}
+					},
+				)
+			}
+		}
+
 	case tea.WindowSizeMsg:
 		d.SetDimensions(msg.Width, msg.Height)
 	}
@@ -97,26 +140,30 @@ func (d *ThemeListDialog) Update(msg tea.Msg) (Dialog, tea.Cmd) {
 
 // filterThemes filters the theme list based on search text
 func (d *ThemeListDialog) filterThemes() {
-	if d.search != "" {
+	if d.search == "" {
+		d.filtered = d.themes
+	} else {
+		d.filtered = []ThemeItem{}
 		searchLower := strings.ToLower(d.search)
-		filtered := []types.Theme{}
+
 		for _, t := range d.themes {
+			// Search in name and description
 			if strings.Contains(strings.ToLower(t.Name), searchLower) ||
-				strings.Contains(strings.ToLower(t.ID), searchLower) {
-				filtered = append(filtered, t)
+				strings.Contains(strings.ToLower(t.Description), searchLower) {
+				d.filtered = append(d.filtered, t)
 			}
 		}
-		d.themes = filtered
 	}
 
-	d.SetItemCount(len(d.themes))
-	if d.selected >= len(d.themes) {
+	d.SetItemCount(len(d.filtered))
+	if d.selected >= len(d.filtered) {
 		d.selected = 0
 	}
 }
 
 // View renders the dialog
 func (d *ThemeListDialog) View() string {
+	// Dialog dimensions
 	width := min(d.width-4, 50)
 	height := min(d.height-4, 18)
 
@@ -137,99 +184,133 @@ func (d *ThemeListDialog) View() string {
 		Padding(0, 1)
 
 	selectedStyle := lipgloss.NewStyle().
-		Foreground(d.theme.Primary).
-		Bold(true).
-		Background(d.theme.PanelBg).
-		Padding(0, 1)
-
-	mutedStyle := lipgloss.NewStyle().
-		Foreground(d.theme.TextMuted)
+		Foreground(d.theme.Background).
+		Background(d.theme.Primary).
+		Padding(0, 1).
+		Bold(true)
 
 	currentStyle := lipgloss.NewStyle().
 		Foreground(d.theme.Success).
-		Bold(true)
+		Padding(0, 1)
 
-	borderStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(d.theme.Border).
-		Padding(1, 1)
+	mutedStyle := lipgloss.NewStyle().
+		Foreground(d.theme.TextMuted).
+		Padding(0, 1)
 
-	// Build content
-	var lines []string
+	// Build dialog content
+	var content strings.Builder
 
 	// Title
-	lines = append(lines, titleStyle.Render(d.title))
+	content.WriteString(titleStyle.Render(d.title))
+	content.WriteString("\n\n")
 
-	// Search
-	searchText := "🔍 " + d.search
-	if d.search == "" {
-		searchText = "🔍 Search themes..."
+	// Search box
+	searchText := d.search
+	if searchText == "" {
+		searchText = "Type to search..."
+		searchStyle = searchStyle.Foreground(d.theme.TextMuted)
 	}
-	lines = append(lines, searchStyle.Render(searchText))
-	lines = append(lines, "")
+	content.WriteString(searchStyle.Render("/ " + searchText))
+	content.WriteString("\n\n")
 
 	// Theme list
-	visibleHeight := height - 6
-	startIdx := d.selected
-	if startIdx > len(d.themes)-visibleHeight {
-		startIdx = max(0, len(d.themes)-visibleHeight)
+	listHeight := height - 6 // Account for title, search, and hints
+	startIdx := 0
+	endIdx := len(d.filtered)
+
+	// Scroll if list is too long
+	if len(d.filtered) > listHeight {
+		// Center selection
+		startIdx = d.selected - listHeight/2
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		endIdx = startIdx + listHeight
+		if endIdx > len(d.filtered) {
+			endIdx = len(d.filtered)
+			startIdx = endIdx - listHeight
+			if startIdx < 0 {
+				startIdx = 0
+			}
+		}
 	}
 
-	for i := startIdx; i < len(d.themes) && i < startIdx+visibleHeight; i++ {
-		t := d.themes[i]
+	// Show scroll indicators
+	if startIdx > 0 {
+		content.WriteString(mutedStyle.Render("  ▲ ..."))
+		content.WriteString("\n")
+	}
 
-		// Format theme line
-		var line string
-		if t.ID == d.state.KV.Theme {
-			line = fmt.Sprintf("✓ %s", t.Name)
+	for i := startIdx; i < endIdx; i++ {
+		theme := d.filtered[i]
+		isSelected := i == d.selected
+		isCurrent := theme.ID == d.currentTheme
+
+		// Format: "1. Theme Name ●" or "   Theme Name"
+		var line strings.Builder
+
+		// Number hint
+		if i < 8 {
+			line.WriteString(fmt.Sprintf("%d. ", i+1))
 		} else {
-			line = fmt.Sprintf("  %s", t.Name)
+			line.WriteString("   ")
 		}
 
-		// Show preview color
-		preview := lipgloss.NewStyle().
-			Background(t.Primary).
-			Render("   ")
-		line = lipgloss.JoinHorizontal(lipgloss.Left, line, "  ", preview)
+		line.WriteString(theme.Name)
 
-		if i == d.selected {
-			lines = append(lines, selectedStyle.Render(line))
-		} else if t.ID == d.state.KV.Theme {
-			lines = append(lines, currentStyle.Render(line))
+		// Add indicator for current theme
+		if isCurrent {
+			line.WriteString(" ●")
+		}
+
+		// Apply style
+		if isSelected {
+			content.WriteString(selectedStyle.Render(line.String()))
+		} else if isCurrent {
+			content.WriteString(currentStyle.Render(line.String()))
 		} else {
-			lines = append(lines, itemStyle.Render(line))
+			content.WriteString(itemStyle.Render(line.String()))
 		}
+		content.WriteString("\n")
 	}
 
-	// Empty state
-	if len(d.themes) == 0 {
-		emptyText := "No themes found"
-		if d.search != "" {
-			emptyText = fmt.Sprintf("No themes matching \"%s\"", d.search)
-		}
-		lines = append(lines, mutedStyle.Render(emptyText))
+	if endIdx < len(d.filtered) {
+		content.WriteString(mutedStyle.Render("  ▼ ..."))
+		content.WriteString("\n")
 	}
 
-	// Footer
-	hints := "↑/↓ Navigate  Enter Select  Esc Close"
-	lines = append(lines, "")
-	lines = append(lines, mutedStyle.Render(hints))
+	// Fill empty space
+	linesRendered := endIdx - startIdx
+	if startIdx > 0 {
+		linesRendered++
+	}
+	if endIdx < len(d.filtered) {
+		linesRendered++
+	}
+	for i := linesRendered; i < listHeight; i++ {
+		content.WriteString("\n")
+	}
 
-	content := strings.Join(lines, "\n")
-	return borderStyle.Width(width).Height(height).Render(content)
+	// Hints
+	content.WriteString("\n")
+	hintStyle := lipgloss.NewStyle().
+		Foreground(d.theme.TextMuted).
+		Padding(0, 1)
+	content.WriteString(hintStyle.Render("Enter: Select  1-8: Quick select  Esc: Cancel"))
+
+	// Dialog border
+	dialogStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(d.theme.Border).
+		Padding(1, 2).
+		Width(width)
+
+	return dialogStyle.Render(content.String())
 }
 
 // min returns the minimum of two integers
 func min(a, b int) int {
 	if a < b {
-		return a
-	}
-	return b
-}
-
-// max returns the maximum of two integers
-func max(a, b int) int {
-	if a > b {
 		return a
 	}
 	return b
