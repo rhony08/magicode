@@ -674,12 +674,8 @@ func (a *App) renderToolCall(tc *ToolCall) string {
 
 // handleKey handles keyboard input
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Debug: Log entry into handleKey
-	log.Info("handleKey called", "key", msg.String(), "hasActiveDialog", a.activeDialog != nil, "hasDialogStack", a.state.Dialog.HasOpen())
-
 	// If active dialog is open, route keys to it
 	if a.activeDialog != nil {
-		log.Info("Routing to activeDialog")
 		var cmd tea.Cmd
 		a.activeDialog, cmd = a.activeDialog.Update(msg)
 		return a, cmd
@@ -829,14 +825,10 @@ func (a *App) handleDialogSelect(dialog *DialogState) (tea.Model, tea.Cmd) {
 func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	kb := a.keybindings
 
-	// Debug: Log key press
-	log.Info("Key pressed", "key", msg.String(), "type", msg.Type, "runes", msg.Runes, "mode", a.mode)
-
 	// Check for leader key first (Ctrl+X)
 	// This must be checked before any other keybindings
 	handled, cmd, leaderMsg := a.leaderHandler.HandleKey(msg)
 	if handled {
-		log.Info("Leader handler consumed key")
 		// If we got a leader action, handle it
 		if leaderMsg != nil {
 			return a.handleLeaderAction(leaderMsg)
@@ -847,20 +839,16 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case kb.Submit.Match(msg):
-		log.Info("Submit matched")
 		return a.submitInput()
 
 	case kb.Sessions.Match(msg):
-		log.Info("Sessions matched")
 		a.view = ViewSession
 		return a, nil
 
 	case kb.Help.Match(msg):
-		log.Info("Help matched")
 		return a, a.showHelpDialog()
 
 	case kb.NewSession.Match(msg):
-		log.Info("NewSession matched")
 		return a, a.createSession()
 
 	case kb.Up.Match(msg):
@@ -907,31 +895,21 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Pass to prompt's input if in input mode and not a control key
 	// This handles regular typing
-	log.Info("Reached input section", "mode", a.mode, "isModeInput", a.mode == ModeInput)
 	if a.mode == ModeInput {
-		log.Info("Mode is Input, checking key type", "keyType", msg.Type, "hasRunes", msg.Runes != nil && len(msg.Runes) > 0)
 		// Only pass printable characters and essential editing keys to input
 		switch msg.Type {
 		case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyLeft, tea.KeyRight:
-			log.Info("Key type matches, updating prompt input")
 			// Update the prompt's internal input by passing the message to it
 			_, cmd := a.prompt.Update(msg)
-			log.Info("Prompt input updated", "newValue", a.prompt.GetValue())
 			return a, cmd
 		}
 		// Also handle keys with runes
 		if msg.Runes != nil && len(msg.Runes) > 0 {
-			log.Info("Key has runes, updating prompt input")
 			_, cmd := a.prompt.Update(msg)
-			log.Info("Prompt input updated (via runes)", "newValue", a.prompt.GetValue())
 			return a, cmd
 		}
-		log.Info("Key did not match input criteria")
-	} else {
-		log.Info("Not in input mode", "mode", a.mode)
 	}
 
-	log.Info("Key not handled, returning")
 	return a, nil
 }
 
