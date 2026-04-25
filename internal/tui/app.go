@@ -956,11 +956,13 @@ func (a *App) sendMessage(content string) tea.Cmd {
 // createSession creates a new session and persists it to the database
 func (a *App) createSession() tea.Cmd {
 	return func() tea.Msg {
+		log.Info("Creating session", "databasePath", a.databasePath, "workingDirectory", a.workingDirectory)
+
 		// Create session in database
 		ctx := context.Background()
 		db, err := database.New(ctx, database.Config{Path: a.databasePath})
 		if err != nil {
-			log.Error("Failed to open database for session creation", "error", err.Error())
+			log.Error("Failed to open database for session creation", "error", err.Error(), "path", a.databasePath)
 			return SessionMsg{
 				ID:     "",
 				Title:  "",
@@ -1043,10 +1045,19 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 // loadSessionsFromDB loads sessions from the database
 func (a *App) loadSessionsFromDB() tea.Cmd {
 	return func() tea.Msg {
+		// Log the database path being used
+		log.Info("Loading sessions from database", "path", a.databasePath)
+
+		// Check if database file exists
+		if _, err := os.Stat(a.databasePath); os.IsNotExist(err) {
+			log.Warn("Database file does not exist", "path", a.databasePath)
+			return nil
+		}
+
 		ctx := context.Background()
 		db, err := database.New(ctx, database.Config{Path: a.databasePath})
 		if err != nil {
-			log.Error("Failed to open database for loading sessions", "error", err.Error())
+			log.Error("Failed to open database for loading sessions", "error", err.Error(), "path", a.databasePath)
 			return nil
 		}
 		defer db.Close()
@@ -1059,6 +1070,8 @@ func (a *App) loadSessionsFromDB() tea.Cmd {
 			log.Error("Failed to load sessions from database", "error", err.Error())
 			return nil
 		}
+
+		log.Info("Retrieved sessions from database", "count", len(dbSessions))
 
 		// Convert database sessions to TUI sessions
 		var sessions []Session
