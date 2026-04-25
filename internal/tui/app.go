@@ -672,9 +672,11 @@ func (a *App) renderToolCall(tc *ToolCall) string {
 
 // handleKey handles keyboard input
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// If dialog is open, handle dialog keys first
-	if a.state.Dialog.HasOpen() {
-		return a.handleDialogKey(msg)
+	// If active dialog is open, route keys to it
+	if a.activeDialog != nil {
+		var cmd tea.Cmd
+		a.activeDialog, cmd = a.activeDialog.Update(msg)
+		return a, cmd
 	}
 
 	// Check for quit
