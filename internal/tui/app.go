@@ -180,6 +180,17 @@ func NewApp(cfg Config) *App {
 
 // Init initializes the app (tea.Model interface)
 func (a *App) Init() tea.Cmd {
+	// Load theme preference from database if available
+	if a.databasePath != "" {
+		savedTheme := a.loadThemePreference()
+		if savedTheme != "" && savedTheme != a.state.KV.Theme {
+			a.state.SetTheme(savedTheme)
+			a.theme = GetTheme(savedTheme)
+			a.styles = ApplyTheme(a.theme)
+			a.spinner.Style = lipgloss.NewStyle().Foreground(a.theme.Spinner)
+		}
+	}
+
 	return tea.Batch(
 		a.spinner.Tick,
 		textinput.Blink,
@@ -767,6 +778,10 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
 				a.spinner.Style = lipgloss.NewStyle().Foreground(a.theme.Spinner)
 				a.state.SetStatus(fmt.Sprintf("Theme changed to %s", themeID))
 				a.activeDialog = nil
+				// Save theme preference to database
+				if err := a.saveThemePreference(themeID); err != nil {
+					log.Warn("Failed to save theme preference", "error", err, "theme", themeID)
+				}
 			}
 		}
 
@@ -1582,4 +1597,48 @@ func (a *App) showStatusDialog() tea.Cmd {
 		len(a.state.Sync.Messages),
 		a.state.KV.Theme))
 	return nil
+}
+
+// saveThemePreference saves the theme preference to the database
+func (a *App) saveThemePreference(themeID string) error {
+	if a.databasePath == "" {
+		return nil // No database to save to
+	}
+
+	ctx := context.Background()
+	db, err := database.New(ctx, database.Config{Path: a.databasePath})
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	kvStorage := database.NewKVStorage(db)
+
+	if err := kvStorage.SetTheme(ctx, themeID); err != nil {
+		return fmt.Errorf("failed to save theme: %w", err)
+	}
+
+	log.Info("Theme preference saved", "theme", themeID)
+	return nil
+}
+
+// loadThemePreference loads the theme preference from the database
+func (a *App) loadThemePreference() string {
+	if a.databasePath == "" {
+		return a.state.KV.Theme // Return current theme if no database
+	}
+
+	ctx := context.Background()
+	db, err := database.New(ctx, database.Config{Path: a.databasePath})
+	if err != nil {
+		log.Warn("Failed to open database for theme loading", "error", err)
+		return a.state.KV.Theme
+	}
+	defer db.Close()
+
+	kvStorage := database.NewKVStorage(db)
+
+	theme := kvStorage.GetTheme(ctx)
+	log.Info("Theme preference loaded", "theme", theme)
+	return theme
 }
