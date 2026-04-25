@@ -160,7 +160,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		sessionStorage := database.NewSessionStorage(db)
 		session, err := sessionStorage.Get(ctx, sessionID)
 		if err != nil {
-			return fmt.Errorf("session not found: %s\n\nUse 'magicode session list --all' to see available sessions", sessionID)
+			return fmt.Errorf("session not found: %s\n\nUse 'magicode session list --all' or 'magicode --use-opencode session list --all' to see available sessions", sessionID)
 		}
 
 		sessionTitle = session.Title
