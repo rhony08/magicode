@@ -110,12 +110,17 @@ internal/tui/
 - ✅ Phase 3.4: DialogHelp - Keyboard shortcuts organized by category
 - ✅ Phase 4.1: Leader Key System - Ctrl+X prefix with 2s timeout
 - ✅ Phase 4.2: Keybind Registry - All leader actions mapped (l, n, m, a, etc.)
+- ✅ Phase 5.1: Theme Registry - 8 built-in themes (default, catppuccin, dracula, tokyonight, nord, gruvbox, onehalf, solarized)
+- ✅ Phase 5.2: Theme File Loading - Load custom themes from ~/.config/magicode/themes/*.json
+- ✅ Phase 5.3: Theme Switching Dialog - Ctrl+X t to open theme list dialog
+- ✅ Phase 5.4: Theme Persistence - Save/load theme preference to KVStore (SQLite)
+- ✅ File Storage Tests - Comprehensive tests for OpenCode v1.2 file-based storage adapter
+- ✅ KV Storage Tests - Tests for KV storage with theme preferences
 
 ### In Progress
-- None (Phase 4 complete)
+- None (Phase 5 complete)
 
 ### Pending
-- ⏳ Phase 5: Theme Persistence (save to KVStore, theme dialog)
 - ⏳ Phase 6: Advanced Features (tool result rendering, markdown, undo/redo)
 - ⏳ Phase 7: Polish (animations, sound, clipboard)
 
