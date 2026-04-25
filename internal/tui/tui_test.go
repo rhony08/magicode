@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestNewApp tests app creation
@@ -25,8 +25,8 @@ func TestNewApp(t *testing.T) {
 	if app.mode != ModeInput {
 		t.Errorf("Initial mode should be ModeInput, got %s", app.mode)
 	}
-	if app.status != "Ready" {
-		t.Errorf("Initial status should be 'Ready', got '%s'", app.status)
+	if app.state.StatusText != "Ready" {
+		t.Errorf("Initial status should be 'Ready', got '%s'", app.state.StatusText)
 	}
 }
 
@@ -41,14 +41,15 @@ func TestNewAppWithSession(t *testing.T) {
 		Session: session,
 	})
 
-	if app.activeSession == nil {
+	active := app.ActiveSession()
+	if active == nil {
 		t.Error("App should have active session")
 	}
-	if app.activeSession.ID != "test-session" {
-		t.Errorf("Session ID should be 'test-session', got '%s'", app.activeSession.ID)
+	if active.ID != "test-session" {
+		t.Errorf("Session ID should be 'test-session', got '%s'", active.ID)
 	}
-	if len(app.sessions) != 1 {
-		t.Errorf("Should have 1 session, got %d", len(app.sessions))
+	if len(app.state.Sync.Sessions) != 1 {
+		t.Errorf("Should have 1 session, got %d", len(app.state.Sync.Sessions))
 	}
 }
 
@@ -220,8 +221,8 @@ func TestAppSetStatus(t *testing.T) {
 	app := NewApp(Config{})
 	app.SetStatus("Processing")
 
-	if app.status != "Processing" {
-		t.Errorf("Status should be 'Processing', got '%s'", app.status)
+	if app.state.StatusText != "Processing" {
+		t.Errorf("Status should be 'Processing', got '%s'", app.state.StatusText)
 	}
 }
 
@@ -233,8 +234,8 @@ func TestAppAddMessage(t *testing.T) {
 		Content: "Hello",
 	})
 
-	if len(app.messages) != 1 {
-		t.Errorf("Should have 1 message, got %d", len(app.messages))
+	if len(app.state.Sync.Messages) != 1 {
+		t.Errorf("Should have 1 message, got %d", len(app.state.Sync.Messages))
 	}
 }
 
@@ -249,8 +250,8 @@ func TestAppSetMessages(t *testing.T) {
 
 	app.SetMessages(messages)
 
-	if len(app.messages) != 2 {
-		t.Errorf("Should have 2 messages, got %d", len(app.messages))
+	if len(app.state.Sync.Messages) != 2 {
+		t.Errorf("Should have 2 messages, got %d", len(app.state.Sync.Messages))
 	}
 }
 
@@ -265,17 +266,17 @@ func TestAppSetSessions(t *testing.T) {
 
 	app.SetSessions(sessions)
 
-	if len(app.sessions) != 2 {
-		t.Errorf("Should have 2 sessions, got %d", len(app.sessions))
+	if len(app.state.Sync.Sessions) != 2 {
+		t.Errorf("Should have 2 sessions, got %d", len(app.state.Sync.Sessions))
 	}
 }
 
 // TestAppMethods tests accessor methods
 func TestAppMethods(t *testing.T) {
 	app := NewApp(Config{})
-	app.width = 100
-	app.height = 50
-	app.processing = true
+	app.state.Layout.Width = 100
+	app.state.Layout.Height = 50
+	app.state.Processing = true
 
 	if app.Width() != 100 {
 		t.Errorf("Width should be 100, got %d", app.Width())

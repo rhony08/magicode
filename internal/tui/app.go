@@ -1,7 +1,9 @@
 // Package tui provides the main TUI application.
+// This file implements the Bubble Tea Model interface with layered state management.
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -11,40 +13,42 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rhony08/magicode/internal/database"
+	"github.com/rhony08/magicode/internal/tui/dialog"
+	"github.com/rhony08/magicode/internal/tui/layout"
+	"github.com/rhony08/magicode/internal/util/log"
 )
 
-// App is the main TUI application
+// App is the main TUI application implementing tea.Model
 type App struct {
-	// State
-	view     ViewState
-	mode     InputMode
-	width    int
-	height   int
-	focused  bool
+	// Core state - layered architecture
+	state  AppState
+	theme  Theme
+	styles ThemeStyles
 
-	// Sessions
-	sessions    []Session
-	activeSession *Session
-	sessionID   string  // Current session ID for reference
+	// Database path for message loading
+	databasePath string
 
-	// Messages
-	messages    []Message
+	// UI components - layout package
+	sidebar       *layout.Sidebar
+	mobileSidebar *layout.MobileSidebar
+	footer        *layout.Footer
+	statusBar     *layout.StatusBar
+	prompt        *layout.Prompt
+	keybindHints  *layout.KeybindHintBar
+
+	// Active dialog (if any)
+	activeDialog dialog.Dialog
+
+	// Legacy components (kept for compatibility)
+	input           textinput.Model
+	spinner         spinner.Model
 	messageViewport viewport.Model
 
-	// Input
-	input       textinput.Model
-	inputHistory []string
-	historyIndex int
-
-	// Status
-	status      string
-	spinner     spinner.Model
-	processing  bool
-
-	// Error
-	lastError   error
-	showError   bool
-	errorTimer  *time.Timer
+	// Legacy compatibility
+	view    ViewState
+	mode    InputMode
+	focused bool
 
 	// Help
 	showHelp    bool
@@ -52,29 +56,65 @@ type App struct {
 
 	// Keybindings
 	keybindings Keybindings
+
+	// Error timer (for auto-dismiss)
+	errorTimer *time.Timer
 }
 
-// Config represents app configuration
+// Config represents app configuration for initialization
 type Config struct {
-	Title       string
-	Session     Session
-	InitialMessages []Message  // Pre-loaded messages for session continuation
-	SessionID   string        // Session ID for loading messages
+	Title           string
+	Session         Session
+	InitialMessages []Message   // Pre-loaded messages for session continuation
+	SessionID       string      // Session ID for loading messages
+	Theme           string      // Theme name (optional, defaults to "default")
+	Directory       string      // Working directory
+	MessageMeta     MessageMeta // Pagination metadata for initial load
+	DatabasePath    string      // Database path for loading more messages
 }
 
-// NewApp creates a new TUI application
+// NewApp creates a new TUI application with layered state management
 func NewApp(cfg Config) *App {
-	// Create input
+	// Initialize state
+	state := NewAppState()
+	state.SessionID = cfg.SessionID
+	state.Route = RouteSession
+	state.SetStatus("Ready")
+
+	// Apply initial configuration
+	if cfg.Session.ID != "" {
+		state.SetActiveSession(&cfg.Session)
+		state.Sync.Sessions = []Session{cfg.Session}
+	}
+	if len(cfg.InitialMessages) > 0 {
+		state.SetMessages(cfg.InitialMessages)
+
+		// Set pagination metadata from config
+		meta := cfg.MessageMeta
+		meta.Limit = len(cfg.InitialMessages)
+		state.SetMessageMeta(cfg.SessionID, meta)
+
+		state.SetStatus(fmt.Sprintf("Loaded %d messages", len(cfg.InitialMessages)))
+	}
+	if cfg.Theme != "" {
+		state.SetTheme(cfg.Theme)
+	}
+
+	// Get theme
+	theme := GetTheme(state.KV.Theme)
+	styles := ApplyTheme(theme)
+
+	// Create input component
 	ti := textinput.New()
 	ti.Placeholder = "Type your message..."
 	ti.Focus()
 	ti.CharLimit = 5000
 	ti.Width = 50
 
-	// Create spinner
+	// Create spinner component
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	s.Style = lipgloss.NewStyle().Foreground(theme.Spinner)
 
 	// Create message viewport
 	vp := viewport.New(80, 20)
@@ -82,42 +122,38 @@ func NewApp(cfg Config) *App {
 	// Default help content
 	help := buildHelpContent()
 
+	// Create layout components
+	sidebar := layout.NewSidebar(layout.DefaultSidebarConfig(), theme)
+	mobileSidebar := layout.NewMobileSidebar(theme)
+	footer := layout.NewFooter(layout.DefaultFooterConfig(), theme)
+	statusBar := layout.NewStatusBar(layout.DefaultFooterConfig(), theme)
+	prompt := layout.NewPrompt(layout.DefaultPromptConfig(), theme)
+	keybindHints := layout.NewKeybindHintBar(theme)
+
 	app := &App{
-		view:          ViewChat,
-		mode:          ModeInput,
-		input:         ti,
-		spinner:       s,
+		state:           state,
+		theme:           theme,
+		styles:          styles,
+		databasePath:    cfg.DatabasePath,
+		sidebar:         sidebar,
+		mobileSidebar:   mobileSidebar,
+		footer:          footer,
+		statusBar:       statusBar,
+		prompt:          prompt,
+		keybindHints:    keybindHints,
+		input:           ti,
+		spinner:         s,
 		messageViewport: vp,
-		status:        "Ready",
-		helpContent:   help,
-		keybindings:   DefaultKeybindings(),
-		inputHistory:  []string{},
-	}
-
-	// Add initial session if provided
-	if cfg.Session.ID != "" {
-		app.sessions = []Session{cfg.Session}
-		app.activeSession = &cfg.Session
-		app.sessionID = cfg.Session.ID
-	}
-
-	// Set session ID if provided separately
-	if cfg.SessionID != "" {
-		app.sessionID = cfg.SessionID
-	}
-
-	// Load initial messages if provided (from database)
-	if len(cfg.InitialMessages) > 0 {
-		app.messages = cfg.InitialMessages
-		app.messageViewport.SetContent(app.buildMessagesContent())
-		app.messageViewport.GotoBottom()
-		app.status = fmt.Sprintf("Loaded %d messages", len(cfg.InitialMessages))
+		view:            ViewChat,
+		mode:            ModeInput,
+		helpContent:     help,
+		keybindings:     DefaultKeybindings(),
 	}
 
 	return app
 }
 
-// Init initializes the app
+// Init initializes the app (tea.Model interface)
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(
 		a.spinner.Tick,
@@ -125,19 +161,27 @@ func (a *App) Init() tea.Cmd {
 	)
 }
 
-// Update handles events
+// Update handles events (tea.Model interface)
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// Handle resize events - update state dimensions
+	if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		a.state.SetDimensions(wsMsg.Width, wsMsg.Height)
+		a.updateViewportSize()
+		a.input.Width = a.state.Layout.Width - 20
+
+		// Update layout components
+		a.sidebar.SetDimensions(a.state.KV.SidebarWidth/8, a.state.Layout.Height-6)
+		a.footer.SetWidth(a.state.Layout.Width)
+		a.statusBar.SetWidth(a.state.Layout.Width)
+		a.prompt.SetDimensions(a.state.Layout.Width, 5)
+		a.keybindHints.SetWidth(a.state.Layout.Width)
+	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return a.handleKey(msg)
-
-	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
-		a.updateViewportSize()
-		a.input.Width = a.width - 20
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -147,9 +191,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StreamMsg:
 		a.appendToLastMessage(msg.Content)
 		if msg.Done {
-			a.processing = false
+			a.state.Processing = false
 			a.mode = ModeInput
-			a.status = "Ready"
+			a.state.SetStatus("Ready")
 		}
 
 	case ResponseMsg:
@@ -162,15 +206,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Timestamp: time.Now(),
 			})
 		}
-		a.processing = false
+		a.state.Processing = false
 		a.mode = ModeInput
-		a.status = "Ready"
+		a.state.SetStatus("Ready")
 
 	case ToolCallMsg:
 		a.addMessage(Message{
 			Role:      RoleTool,
 			Timestamp: time.Now(),
-			ToolCall:  &ToolCall{
+			ToolCall: &ToolCall{
 				Tool:   msg.Tool,
 				Input:  msg.Input,
 				Result: msg.Result,
@@ -188,22 +232,61 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Error != nil {
 			a.setError(msg.Error)
 		} else {
-			a.messages = msg.Messages
+			a.state.SetMessages(msg.Messages)
 			a.messageViewport.SetContent(a.buildMessagesContent())
 			a.messageViewport.GotoBottom()
 			if len(msg.Messages) > 0 {
-				a.status = fmt.Sprintf("Loaded %d messages", len(msg.Messages))
+				a.state.SetStatus(fmt.Sprintf("Loaded %d messages", len(msg.Messages)))
 			}
 		}
 
-	case TickMsg:
-		if a.showError {
-			a.showError = false
-			a.lastError = nil
+	case LoadMoreMessagesResult:
+		a.state.SetHistoryLoading(a.state.SessionID, false)
+		if msg.Error != nil {
+			a.setError(msg.Error)
+			log.Warn("Failed to load more messages", "error", msg.Error.Error())
+		} else if len(msg.Messages) > 0 {
+			// Prepend older messages
+			a.state.PrependMessages(msg.Messages, msg.Cursor, msg.Complete)
+			a.messageViewport.SetContent(a.buildMessagesContent())
+			a.state.SetStatus(fmt.Sprintf("Loaded %d more messages", len(msg.Messages)))
+			log.Info("Loaded more messages", "count", len(msg.Messages), "cursor", msg.Cursor, "complete", msg.Complete)
 		}
+
+	// Dialog close
+	case dialog.CloseMsg:
+		a.activeDialog = nil
+		a.state.PopDialog()
+
+	// Dialog selection
+	case dialog.SelectMsg:
+		a.handleDialogSelection(msg)
+
+		// Update active dialog
+		if a.activeDialog != nil {
+			var cmd tea.Cmd
+			a.activeDialog, cmd = a.activeDialog.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			// Don't process other keys when dialog is open
+			return a, tea.Batch(cmds...)
+		}
+
+	case TickMsg:
+		if a.state.ShowError {
+			a.state.ShowError = false
+			a.state.LastError = nil
+		}
+
+	// Theme change message
+	case ThemeChangeMsg:
+		a.theme = GetTheme(msg.ThemeID)
+		a.styles = ApplyTheme(a.theme)
+		a.spinner.Style = lipgloss.NewStyle().Foreground(a.theme.Spinner)
 	}
 
-	// Update input
+	// Update input if in input mode
 	if a.mode == ModeInput {
 		var cmd tea.Cmd
 		a.input, cmd = a.input.Update(msg)
@@ -218,42 +301,61 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
-// View renders the app
+// ThemeChangeMsg is sent when the theme changes
+type ThemeChangeMsg struct {
+	ThemeID string
+}
+
+// View renders the app (tea.Model interface)
 func (a *App) View() string {
-	if a.width == 0 || a.height == 0 {
+	width := a.state.Layout.Width
+	height := a.state.Layout.Height
+
+	if width == 0 || height == 0 {
 		return "Loading..."
 	}
 
-	// Build layout
+	// Build responsive layout
 	var sections []string
 
 	// Title bar
 	sections = append(sections, a.renderTitle())
 
-	// Main content
-	contentHeight := a.height - 6 // Reserve space for title, status, input
-	if a.showError {
+	// Main content area
+	contentHeight := height - 6 // Reserve space for title, status, input
+	if a.state.ShowError {
 		contentHeight -= 3
 	}
 
-	switch a.view {
-	case ViewChat:
-		sections = append(sections, a.renderChat(contentHeight))
-	case ViewSession:
-		sections = append(sections, a.renderSessionList(contentHeight))
-	case ViewHelp:
-		sections = append(sections, a.renderHelp(contentHeight))
+	// Sidebar (if visible and wide enough)
+	if a.state.IsSidebarVisible() && !a.state.Layout.IsResponsive() {
+		sections = append(sections, a.renderWithSidebar(contentHeight))
+	} else {
+		sections = append(sections, a.renderMainContent(contentHeight))
 	}
 
-	// Status bar
-	sections = append(sections, a.renderStatus())
+	// Status bar - use layout component
+	a.statusBar.SetProcessing(a.state.Processing, a.spinner.View())
+	sections = append(sections, a.statusBar.Render(&a.state))
 
-	// Input
-	sections = append(sections, a.renderInput())
+	// Input area - use layout component
+	a.prompt.SetProcessing(a.state.Processing, a.spinner.View())
+	a.prompt.SetModelInfo(a.state.Local.CurrentAgent, a.state.Local.CurrentModel.ModelID, a.state.Local.ModelVariant)
+	sections = append(sections, a.prompt.Render())
 
 	// Error overlay
-	if a.showError && a.lastError != nil {
+	if a.state.ShowError && a.state.LastError != nil {
 		sections = append(sections, a.renderError())
+	}
+
+	// Dialog overlay (if any)
+	if a.state.Dialog.HasOpen() {
+		sections = append(sections, a.renderDialog())
+	}
+
+	// Mobile sidebar overlay (for narrow terminals)
+	if a.state.Layout.MobileSidebar.Opened {
+		sections = append(sections, a.mobileSidebar.View())
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -262,19 +364,63 @@ func (a *App) View() string {
 // renderTitle renders the title bar
 func (a *App) renderTitle() string {
 	title := "MagiCode"
-	if a.activeSession != nil {
-		title = fmt.Sprintf("MagiCode - %s", a.activeSession.Title)
+	if len(a.state.Sync.Sessions) > 0 && a.state.Sync.Sessions[0].Title != "" {
+		title = fmt.Sprintf("MagiCode - %s", a.state.Sync.Sessions[0].Title)
 	}
-	return styleTitle.Render(title)
+	return a.styles.Title.Render(title)
+}
+
+// renderWithSidebar renders layout with sidebar
+func (a *App) renderWithSidebar(height int) string {
+	sidebarWidth := a.state.KV.SidebarWidth
+	if sidebarWidth == 0 {
+		sidebarWidth = 344 // Default from OpenCode
+	}
+
+	// Convert sidebarWidth (pixels) to columns (approximately 8 pixels per column)
+	sidebarCols := sidebarWidth / 8
+	if sidebarCols < 43 {
+		sidebarCols = 43 // Minimum width
+	}
+
+	// Calculate content width
+	contentWidth := a.state.Layout.Width - sidebarCols
+
+	// Update sidebar dimensions
+	a.sidebar.SetDimensions(sidebarCols, height)
+
+	// Render sidebar using layout component
+	sidebar := a.sidebar.Render(&a.state)
+
+	// Render main content
+	content := a.renderMainContent(height)
+
+	// Join horizontally
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(sidebarCols).Render(sidebar),
+		lipgloss.NewStyle().Width(contentWidth).Render(content),
+	)
+}
+
+// renderMainContent renders the main content area
+func (a *App) renderMainContent(height int) string {
+	switch a.view {
+	case ViewChat:
+		return a.renderChat(height)
+	case ViewSession:
+		return a.renderSessionList(height)
+	case ViewHelp:
+		return a.renderHelp(height)
+	default:
+		return a.renderChat(height)
+	}
 }
 
 // renderChat renders the chat view
 func (a *App) renderChat(height int) string {
-	// Build messages content
 	content := a.buildMessagesContent()
 	a.messageViewport.SetContent(content)
 
-	// Set viewport height
 	viewportStyle := lipgloss.NewStyle().Height(height)
 	return viewportStyle.Render(a.messageViewport.View())
 }
@@ -282,82 +428,133 @@ func (a *App) renderChat(height int) string {
 // renderSessionList renders the session list
 func (a *App) renderSessionList(height int) string {
 	var lines []string
-	lines = append(lines, styleBold.Render("Sessions"))
+	lines = append(lines, a.styles.Bold.Render("Sessions"))
 
-	for _, session := range a.sessions {
-		style := styleSessionItem
+	for _, session := range a.state.Sync.Sessions {
+		style := a.styles.Text
 		if session.Active {
-			style = styleSessionActive
+			style = a.styles.BorderActive
 		}
 		item := fmt.Sprintf("%s", session.Title)
 		lines = append(lines, style.Render(item))
 	}
 
 	content := strings.Join(lines, "\n")
-	return styleSidebar.Height(height).Render(content)
+	return a.styles.Sidebar.Height(height).Render(content)
 }
 
 // renderHelp renders the help overlay
 func (a *App) renderHelp(height int) string {
-	return styleBorder.Height(height).Render(a.helpContent)
-}
-
-// renderStatus renders the status bar
-func (a *App) renderStatus() string {
-	status := a.status
-	if a.processing {
-		status = a.spinner.View() + " Processing..."
-	}
-	return styleStatus.Width(a.width).Render(status)
-}
-
-// renderInput renders the input field
-func (a *App) renderInput() string {
-	if a.mode == ModeWait {
-		return stylePrompt.Render("Waiting for response...")
-	}
-
-	prompt := stylePrompt.Render("> ")
-	inputField := a.input.View()
-	return lipgloss.NewStyle().Padding(0, 1).Render(prompt + inputField)
+	return a.styles.Border.Height(height).Render(a.helpContent)
 }
 
 // renderError renders the error overlay
 func (a *App) renderError() string {
-	return styleError.Render(fmt.Sprintf("Error: %v", a.lastError))
+	return a.styles.Error.Render(fmt.Sprintf("Error: %v", a.state.LastError))
 }
 
-// buildMessagesContent builds the messages content
+// renderDialog renders the active dialog overlay
+func (a *App) renderDialog() string {
+	// Use active dialog if available
+	if a.activeDialog != nil {
+		return a.activeDialog.View()
+	}
+
+	// Fallback to DialogState rendering (legacy)
+	dialog := a.state.Dialog.Top()
+	if dialog == nil {
+		return ""
+	}
+
+	// Dialog container style
+	dialogStyle := lipgloss.NewStyle().
+		Foreground(a.theme.Text).
+		Background(a.theme.Background).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(a.theme.Primary).
+		Padding(1, 2).
+		Width(60).
+		Height(15)
+
+	var content string
+	switch dialog.Type {
+	case DialogSessionList:
+		content = a.renderDialogSessionList()
+	case DialogModelList:
+		content = a.renderDialogModelList()
+	case DialogHelp:
+		content = a.helpContent
+	default:
+		content = "Dialog: " + string(dialog.Type)
+	}
+
+	return dialogStyle.Render(content)
+}
+
+// renderDialogSessionList renders session selection dialog content
+func (a *App) renderDialogSessionList() string {
+	var lines []string
+	lines = append(lines, a.styles.Bold.Render("Select Session"))
+	lines = append(lines, a.styles.TextMuted.Render("(Esc to close)"))
+	lines = append(lines, "")
+
+	for i, session := range a.state.Sync.Sessions {
+		style := a.styles.Text
+		if i == a.state.Dialog.Top().Selected {
+			style = a.styles.BorderActive
+		}
+		lines = append(lines, style.Render(session.Title))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// renderDialogModelList renders model selection dialog content
+func (a *App) renderDialogModelList() string {
+	var lines []string
+	lines = append(lines, a.styles.Bold.Render("Select Model"))
+	lines = append(lines, a.styles.TextMuted.Render("(Esc to close)"))
+	lines = append(lines, "")
+
+	// Show recent models
+	for _, model := range a.state.Sync.Providers {
+		if len(model.Models) > 0 {
+			lines = append(lines, a.styles.TextMuted.Render(model.Name))
+			for id := range model.Models {
+				lines = append(lines, a.styles.Text.Render(id))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// buildMessagesContent builds the messages content for viewport
 func (a *App) buildMessagesContent() string {
 	var lines []string
 
-	for _, msg := range a.messages {
+	for _, msg := range a.state.Sync.Messages {
 		switch msg.Role {
 		case RoleUser:
-			// Render user message with timestamp
 			timeStr := msg.Timestamp.Format("15:04")
 			userContent := fmt.Sprintf("[%s] You: %s", timeStr, msg.Content)
-			lines = append(lines, styleUserMessage.Render(userContent))
+			lines = append(lines, a.styles.UserMessage.Render(userContent))
 
 		case RoleAssistant:
-			// Render assistant message - either simple content or parts
 			timeStr := msg.Timestamp.Format("15:04")
-
 			if len(msg.Parts) > 0 {
-				// Render with parts
 				partLines := a.renderParts(msg.Parts, msg.Model)
 				lines = append(lines, partLines)
 			} else if msg.Content != "" {
-				// Simple content
 				assistantContent := fmt.Sprintf("[%s] Assistant: %s", timeStr, msg.Content)
 				if msg.Model != "" {
 					assistantContent = fmt.Sprintf("[%s] Assistant (%s): %s", timeStr, msg.Model, msg.Content)
 				}
-				lines = append(lines, styleAssistantMessage.Render(assistantContent))
+				lines = append(lines, a.styles.AssistantMessage.Render(assistantContent))
 			}
 
 		case RoleSystem:
-			lines = append(lines, styleSystemMessage.Render(msg.Content))
+			lines = append(lines, a.styles.SystemMessage.Render(msg.Content))
 
 		case RoleTool:
 			toolLine := a.renderToolCall(msg.ToolCall)
@@ -366,7 +563,7 @@ func (a *App) buildMessagesContent() string {
 	}
 
 	if len(lines) == 0 {
-		return styleTextMuted.Render("No messages. Start a conversation!")
+		return a.styles.TextMuted.Render("No messages. Start a conversation!")
 	}
 
 	return strings.Join(lines, "\n\n")
@@ -380,50 +577,45 @@ func (a *App) renderParts(parts []Part, model string) string {
 	if model != "" {
 		header = fmt.Sprintf("Assistant (%s)", model)
 	}
-	lines = append(lines, styleAssistantMessage.Render(header))
+	lines = append(lines, a.styles.AssistantMessage.Render(header))
 
 	for _, part := range parts {
 		switch part.Type {
 		case "text":
 			if part.Text != "" {
-				lines = append(lines, styleText.Render(part.Text))
+				lines = append(lines, a.styles.Text.Render(part.Text))
 			}
 
 		case "tool_use":
-			toolLine := styleToolUse.Render(fmt.Sprintf("▶ %s", part.ToolName))
+			toolLine := a.styles.ToolUse.Render(fmt.Sprintf("▶ %s", part.ToolName))
 			if part.ToolInput != "" {
-				// Truncate long input
 				input := part.ToolInput
 				if len(input) > 100 {
 					input = input[:100] + "..."
 				}
-				lines = append(lines, styleTextMuted.Render(input))
+				lines = append(lines, a.styles.TextMuted.Render(input))
 			}
 			lines = append(lines, toolLine)
 
 		case "tool_result":
-			statusStyle := styleSuccess
+			statusStyle := a.styles.Success
 			if part.Status == "error" {
-				statusStyle = styleError
-			} else if part.Status == "pending" || part.Status == "running" {
-				statusStyle = styleStatus
+				statusStyle = a.styles.Error
 			}
 
 			toolLine := statusStyle.Render(fmt.Sprintf("✓ %s (%s)", part.ToolName, part.Status))
 			if part.ToolResult != "" {
-				// Truncate long results
 				result := part.ToolResult
 				if len(result) > 200 {
 					result = result[:200] + "..."
 				}
-				lines = append(lines, styleTextMuted.Render(result))
+				lines = append(lines, a.styles.TextMuted.Render(result))
 			}
 			lines = append(lines, toolLine)
 
 		case "thinking":
-			// Thinking/reasoning blocks
 			if part.Text != "" {
-				lines = append(lines, styleThinking.Render(fmt.Sprintf("💭 %s", part.Text)))
+				lines = append(lines, a.styles.Thinking.Render(fmt.Sprintf("💭 %s", part.Text)))
 			}
 		}
 	}
@@ -440,11 +632,11 @@ func (a *App) renderToolCall(tc *ToolCall) string {
 	var style lipgloss.Style
 	switch tc.Status {
 	case "success":
-		style = styleSuccess
+		style = a.styles.Success
 	case "error":
-		style = styleError
+		style = a.styles.Error
 	default:
-		style = styleStatus
+		style = a.styles.Status
 	}
 
 	return style.Render(fmt.Sprintf("[%s] %s", tc.Tool, tc.Status))
@@ -452,6 +644,11 @@ func (a *App) renderToolCall(tc *ToolCall) string {
 
 // handleKey handles keyboard input
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If dialog is open, handle dialog keys first
+	if a.state.Dialog.HasOpen() {
+		return a.handleDialogKey(msg)
+	}
+
 	// Check for quit
 	if msg.Type == tea.KeyCtrlC || msg.String() == "q" {
 		return a, tea.Quit
@@ -465,6 +662,92 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleSessionKey(msg)
 	case ViewHelp:
 		return a.handleHelpKey(msg)
+	}
+
+	return a, nil
+}
+
+// handleDialogKey handles keyboard input when a dialog is open
+func (a *App) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	kb := a.keybindings
+
+	switch {
+	case kb.Back.Match(msg) || kb.Cancel.Match(msg):
+		a.state.PopDialog()
+		return a, nil
+
+	case kb.Up.Match(msg):
+		dialog := a.state.Dialog.Top()
+		if dialog != nil && dialog.Selected > 0 {
+			dialog.Selected--
+		}
+		return a, nil
+
+	case kb.Down.Match(msg):
+		dialog := a.state.Dialog.Top()
+		if dialog != nil {
+			dialog.Selected++
+		}
+		return a, nil
+
+	case kb.Select.Match(msg):
+		// Handle selection based on dialog type
+		dialog := a.state.Dialog.Top()
+		if dialog == nil {
+			return a, nil
+		}
+		return a.handleDialogSelect(dialog)
+	}
+
+	return a, nil
+}
+
+// handleDialogSelection handles selection from a dialog
+func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
+	switch msg.Type {
+	case DialogSessionList:
+		if msg.Data != nil {
+			// Check if "new" was selected
+			if msg.Data == "new" {
+				// Create new session - handled by command
+				return
+			}
+			// Otherwise it's a session selection
+			if session, ok := msg.Data.(Session); ok {
+				a.state.SetActiveSession(&session)
+				a.activeDialog = nil
+			}
+		}
+
+	case DialogModelList:
+		if msg.Data != nil {
+			if modelKey, ok := msg.Data.(ModelKey); ok {
+				a.state.SetCurrentModel(modelKey)
+				a.activeDialog = nil
+			}
+		}
+
+	default:
+		a.activeDialog = nil
+	}
+}
+
+// handleDialogSelect handles the old DialogState format (for compatibility)
+func (a *App) handleDialogSelect(dialog *DialogState) (tea.Model, tea.Cmd) {
+	switch dialog.Type {
+	case DialogSessionList:
+		if dialog.Selected < len(a.state.Sync.Sessions) {
+			session := a.state.Sync.Sessions[dialog.Selected]
+			a.state.SetActiveSession(&session)
+			a.state.PopDialog()
+		}
+
+	case DialogModelList:
+		// TODO: Implement model selection
+		a.state.PopDialog()
+
+	default:
+		a.state.PopDialog()
 	}
 
 	return a, nil
@@ -494,6 +777,10 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case kb.Up.Match(msg):
 		a.messageViewport.LineUp(1)
+		// Check if at top and need to load more
+		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
 		return a, nil
 
 	case kb.Down.Match(msg):
@@ -502,6 +789,10 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case kb.PageUp.Match(msg):
 		a.messageViewport.HalfViewUp()
+		// Check if at top and need to load more
+		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
 		return a, nil
 
 	case kb.PageDown.Match(msg):
@@ -515,10 +806,10 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.navigateHistoryDown(), nil
 
 	case kb.Cancel.Match(msg):
-		if a.processing {
-			a.processing = false
+		if a.state.Processing {
+			a.state.Processing = false
 			a.mode = ModeInput
-			a.status = "Cancelled"
+			a.state.SetStatus("Cancelled")
 		}
 		return a, nil
 	}
@@ -545,15 +836,12 @@ func (a *App) handleSessionKey(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case kb.Up.Match(msg):
-			// Navigate up in session list
 			return a, nil
 
 		case kb.Down.Match(msg):
-			// Navigate down
 			return a, nil
 
 		case kb.Select.Match(msg):
-			// Select session
 			return a, nil
 
 		case kb.NewSession.Match(msg):
@@ -592,18 +880,17 @@ func (a *App) submitInput() (tea.Model, tea.Cmd) {
 	})
 
 	// Add to history
-	a.inputHistory = append(a.inputHistory, content)
-	a.historyIndex = len(a.inputHistory)
+	a.state.Local.InputHistory = append(a.state.Local.InputHistory, content)
+	a.state.Local.HistoryIndex = len(a.state.Local.InputHistory)
 
 	// Clear input
 	a.input.Reset()
 
 	// Set waiting state
-	a.processing = true
+	a.state.Processing = true
 	a.mode = ModeWait
-	a.status = "Processing..."
+	a.state.SetStatus("Processing...")
 
-	// Return command to send message (would be implemented by integration layer)
 	return a, a.sendMessage(content)
 }
 
@@ -617,7 +904,7 @@ func (a *App) sendMessage(content string) tea.Cmd {
 	}
 }
 
-// createSession creates a new session (placeholder)
+// createSession creates a new session
 func (a *App) createSession() tea.Cmd {
 	return func() tea.Msg {
 		session := Session{
@@ -644,38 +931,39 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 			CreatedAt: time.Now(),
 			Active:    true,
 		}
-		a.sessions = append(a.sessions, session)
-		a.activeSession = &session
+		a.state.Sync.Sessions = append(a.state.Sync.Sessions, session)
+		a.state.SetActiveSession(&session)
 
 	case "delete":
-		for i, s := range a.sessions {
+		for i, s := range a.state.Sync.Sessions {
 			if s.ID == msg.ID {
-				a.sessions = append(a.sessions[:i], a.sessions[i+1:]...)
+				a.state.Sync.Sessions = append(a.state.Sync.Sessions[:i], a.state.Sync.Sessions[i+1:]...)
 				break
 			}
 		}
 
 	case "switch":
-		for i, s := range a.sessions {
+		for i, s := range a.state.Sync.Sessions {
 			if s.ID == msg.ID {
-				a.activeSession = &a.sessions[i]
+				a.state.SetActiveSession(&a.state.Sync.Sessions[i])
 				break
 			}
 		}
 	}
 }
 
-// addMessage adds a message
+// addMessage adds a message to the state
 func (a *App) addMessage(msg Message) {
 	msg.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
-	a.messages = append(a.messages, msg)
+	a.state.AddMessage(msg)
 	a.messageViewport.GotoBottom()
 }
 
 // appendToLastMessage appends to the last assistant message
 func (a *App) appendToLastMessage(content string) {
-	if len(a.messages) > 0 {
-		last := &a.messages[len(a.messages)-1]
+	messages := a.state.Sync.Messages
+	if len(messages) > 0 {
+		last := &messages[len(messages)-1]
 		if last.Role == RoleAssistant {
 			last.Content += content
 			a.messageViewport.SetContent(a.buildMessagesContent())
@@ -685,111 +973,328 @@ func (a *App) appendToLastMessage(content string) {
 
 // setError sets an error
 func (a *App) setError(err error) {
-	a.lastError = err
-	a.showError = true
-	a.status = fmt.Sprintf("Error: %v", err)
+	a.state.LastError = err
+	a.state.ShowError = true
+	a.state.SetStatus(fmt.Sprintf("Error: %v", err))
 
 	// Auto-clear after 3 seconds
 	if a.errorTimer != nil {
 		a.errorTimer.Stop()
 	}
 	a.errorTimer = time.AfterFunc(3*time.Second, func() {
-		a.showError = false
+		a.state.ShowError = false
 	})
 }
 
 // navigateHistoryUp navigates input history up
-func (a App) navigateHistoryUp() tea.Model {
-	if a.historyIndex > 0 {
-		a.historyIndex--
-		a.input.SetValue(a.inputHistory[a.historyIndex])
+func (a *App) navigateHistoryUp() tea.Model {
+	if a.state.Local.HistoryIndex > 0 {
+		a.state.Local.HistoryIndex--
+		a.input.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
 	}
-	return &a
+	return a
 }
 
 // navigateHistoryDown navigates input history down
-func (a App) navigateHistoryDown() tea.Model {
-	if a.historyIndex < len(a.inputHistory) {
-		a.historyIndex++
-		if a.historyIndex < len(a.inputHistory) {
-			a.input.SetValue(a.inputHistory[a.historyIndex])
+func (a *App) navigateHistoryDown() tea.Model {
+	if a.state.Local.HistoryIndex < len(a.state.Local.InputHistory) {
+		a.state.Local.HistoryIndex++
+		if a.state.Local.HistoryIndex < len(a.state.Local.InputHistory) {
+			a.input.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
 		} else {
 			a.input.Reset()
 		}
 	}
-	return &a
+	return a
 }
 
 // updateViewportSize updates viewport dimensions
 func (a *App) updateViewportSize() {
-	contentWidth := a.width - 4
-	contentHeight := a.height - 8
+	width := a.state.Layout.Width
+	height := a.state.Layout.Height
+
+	contentWidth := width - 4
+	contentHeight := height - 8
+
 	a.messageViewport.Width = contentWidth
 	a.messageViewport.Height = contentHeight
-}
-
-// SetTitle sets the app title
-func (a *App) SetTitle(title string) {
-	if a.activeSession != nil {
-		a.activeSession.Title = title
-	}
-}
-
-// SetStatus sets the status text
-func (a *App) SetStatus(status string) {
-	a.status = status
-}
-
-// SetSessions sets the session list
-func (a *App) SetSessions(sessions []Session) {
-	a.sessions = sessions
-}
-
-// SetMessages sets the message list
-func (a *App) SetMessages(messages []Message) {
-	a.messages = messages
-	a.messageViewport.GotoBottom()
-}
-
-// ActiveSession returns the active session
-func (a *App) ActiveSession() *Session {
-	return a.activeSession
-}
-
-// Messages returns the messages
-func (a *App) Messages() []Message {
-	return a.messages
-}
-
-// Width returns the terminal width
-func (a *App) Width() int {
-	return a.width
-}
-
-// Height returns the terminal height
-func (a *App) Height() int {
-	return a.height
-}
-
-// Processing returns if processing
-func (a *App) Processing() bool {
-	return a.processing
 }
 
 // buildHelpContent builds the help content
 func buildHelpContent() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
-		styleBold.Render("Keyboard Shortcuts"),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7C3AED")).Render("Keyboard Shortcuts"),
 		"",
-		styleText.Render("Enter       Submit message"),
-		styleText.Render("Ctrl+C/q    Quit"),
-		styleText.Render("Ctrl+S      Sessions list"),
-		styleText.Render("Ctrl+H      Toggle help"),
-		styleText.Render("Ctrl+N      New session"),
-		styleText.Render("↑/↓         Scroll messages"),
-		styleText.Render("PgUp/PgDn   Half-page scroll"),
-		styleText.Render("Ctrl+↑      History up"),
-		styleText.Render("Ctrl+↓      History down"),
-		styleText.Render("Esc         Cancel/back"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Enter       Submit message"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+C/q    Quit"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+S      Sessions list"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+H      Toggle help"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+N      New session"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("↑/↓         Scroll messages"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("PgUp/PgDn   Half-page scroll"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+↑      History up"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Ctrl+↓      History down"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Render("Esc         Cancel/back"),
 	)
+}
+
+// ===========================================
+// Accessor Methods (for integration layer)
+// ===========================================
+
+// SetTitle sets the app title
+func (a *App) SetTitle(title string) {
+	if len(a.state.Sync.Sessions) > 0 {
+		a.state.Sync.Sessions[0].Title = title
+	}
+}
+
+// SetStatus sets the status text
+func (a *App) SetStatus(status string) {
+	a.state.SetStatus(status)
+}
+
+// SetSessions sets the session list
+func (a *App) SetSessions(sessions []Session) {
+	a.state.SetSessions(sessions)
+}
+
+// SetMessages sets the message list
+func (a *App) SetMessages(messages []Message) {
+	a.state.SetMessages(messages)
+	a.messageViewport.GotoBottom()
+}
+
+// ActiveSession returns the active session
+func (a *App) ActiveSession() *Session {
+	if len(a.state.Sync.Sessions) == 0 {
+		return nil
+	}
+	// Return first session as active (simplified)
+	return &a.state.Sync.Sessions[0]
+}
+
+// Messages returns the messages
+func (a *App) Messages() []Message {
+	return a.state.Sync.Messages
+}
+
+// Width returns the terminal width
+func (a *App) Width() int {
+	return a.state.Layout.Width
+}
+
+// Height returns the terminal height
+func (a *App) Height() int {
+	return a.state.Layout.Height
+}
+
+// Processing returns if processing
+func (a *App) Processing() bool {
+	return a.state.Processing
+}
+
+// State returns the app state (for direct access)
+func (a *App) State() *AppState {
+	return &a.state
+}
+
+// Theme returns the current theme
+func (a *App) Theme() Theme {
+	return a.theme
+}
+
+// Styles returns the current styles
+func (a *App) Styles() ThemeStyles {
+	return a.styles
+}
+
+// ===========================================
+// Pagination Methods
+// ===========================================
+
+// atTopOfMessages returns true if viewport is at the top of messages
+func (a *App) atTopOfMessages() bool {
+	return a.messageViewport.YOffset <= 1
+}
+
+// loadMoreMessages returns a command to load more messages from history
+func (a *App) loadMoreMessages() tea.Cmd {
+	// Check if we can load more
+	if !a.state.HistoryMore(a.state.SessionID) {
+		return nil
+	}
+
+	// Mark as loading
+	a.state.SetHistoryLoading(a.state.SessionID, true)
+	a.state.SetStatus("Loading more messages...")
+
+	return func() tea.Msg {
+		// Open database
+		ctx := context.Background()
+		db, err := database.New(ctx, database.Config{Path: a.databasePath})
+		if err != nil {
+			log.Warn("Failed to open database for loadMore", "error", err.Error())
+			return LoadMoreMessagesResult{Error: err}
+		}
+		defer db.Close()
+
+		// Get cursor from metadata
+		meta := a.state.GetMessageMeta(a.state.SessionID)
+		cursor := meta.Cursor
+
+		// Load more messages (HistoryMessagePageSize = 200)
+		messageStorage := database.NewMessageStorage(db)
+		partStorage := database.NewPartStorage(db)
+
+		dbMessages, nextCursor, complete, err := messageStorage.ListPaginated(ctx, a.state.SessionID, HistoryMessagePageSize, cursor)
+		if err != nil {
+			log.Warn("Failed to load more messages", "error", err.Error())
+			return LoadMoreMessagesResult{Error: err}
+		}
+
+		// Convert database messages to TUI messages
+		var messages []Message
+		for _, dbMsg := range dbMessages {
+			tuiMsg := convertDBMessageToTUI(dbMsg)
+
+			// Load parts for all messages
+			parts, err := partStorage.ListByMessage(ctx, dbMsg.ID)
+			if err == nil && len(parts) > 0 {
+				tuiMsg.Parts = convertPartsToTUI(parts)
+				// For user messages, extract text from parts if available
+				if dbMsg.Data.Role == "user" {
+					for _, part := range parts {
+						if part.Data.Type == "text" && part.Data.Text != "" {
+							tuiMsg.Content = part.Data.Text
+							break
+						}
+					}
+				}
+			}
+
+			messages = append(messages, tuiMsg)
+		}
+
+		log.Info("Loaded more messages from database", "count", len(messages), "cursor", nextCursor, "complete", complete)
+
+		return LoadMoreMessagesResult{
+			Messages: messages,
+			Cursor:   nextCursor,
+			Complete: complete,
+		}
+	}
+}
+
+// convertDBMessageToTUI converts a database message to a TUI message
+func convertDBMessageToTUI(dbMsg database.Message) Message {
+	role := RoleUser
+	if dbMsg.Data.Role == "assistant" {
+		role = RoleAssistant
+	} else if dbMsg.Data.Role == "system" {
+		role = RoleSystem
+	}
+
+	// Extract timestamp from data.time.created if available
+	var timestamp time.Time
+	if dbMsg.Data.Time != nil {
+		if created, ok := dbMsg.Data.Time["created"]; ok {
+			switch v := created.(type) {
+			case float64:
+				timestamp = time.UnixMilli(int64(v))
+			case int64:
+				timestamp = time.UnixMilli(v)
+			case int:
+				timestamp = time.UnixMilli(int64(v))
+			default:
+				timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+			}
+		} else {
+			timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+		}
+	} else {
+		timestamp = time.UnixMilli(dbMsg.Timestamps.TimeCreated)
+	}
+
+	return Message{
+		ID:        dbMsg.ID,
+		Role:      role,
+		Content:   "",
+		Timestamp: timestamp,
+		Model:     dbMsg.Data.ModelID,
+		Provider:  dbMsg.Data.ProviderID,
+	}
+}
+
+// convertPartsToTUI converts database parts to TUI parts
+// Filters out internal parts (patch, step-start, step-finish)
+func convertPartsToTUI(parts []database.Part) []Part {
+	skipParts := map[string]bool{
+		"patch":       true,
+		"step-start":  true,
+		"step-finish": true,
+	}
+
+	var result []Part
+	for _, p := range parts {
+		if skipParts[p.Data.Type] {
+			continue
+		}
+
+		tuiPart := Part{
+			ID:     p.ID,
+			Type:   p.Data.Type,
+			Text:   p.Data.Text,
+			Status: p.Data.Status,
+		}
+
+		if p.Data.Type == "file" {
+			tuiPart.Text = fmt.Sprintf("[File: %s]", p.Data.Filename)
+		}
+
+		if p.Data.Type == "tool_use" || p.Data.Type == "tool_result" {
+			tuiPart.ToolName = p.Data.ToolName
+			tuiPart.ToolID = p.Data.ToolID
+			if p.Data.Type == "tool_result" {
+				tuiPart.ToolResult = p.Data.ToolResult
+			}
+		}
+
+		result = append(result, tuiPart)
+	}
+	return result
+}
+
+// ===========================================
+// Dialog Methods
+// ===========================================
+
+// showSessionListDialog opens the session list dialog
+func (a *App) showSessionListDialog() tea.Cmd {
+	a.activeDialog = dialog.NewSessionListDialog(a.theme, &a.state)
+	a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
+	a.state.PushDialog(DialogSessionList)
+	return a.activeDialog.Init()
+}
+
+// showModelListDialog opens the model list dialog
+func (a *App) showModelListDialog() tea.Cmd {
+	a.activeDialog = dialog.NewModelListDialog(a.theme, &a.state)
+	a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
+	a.state.PushDialog(DialogModelList)
+	return a.activeDialog.Init()
+}
+
+// showHelpDialog opens the help dialog
+func (a *App) showHelpDialog() tea.Cmd {
+	a.activeDialog = dialog.NewHelpDialog(a.theme)
+	a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
+	a.state.PushDialog(DialogHelp)
+	return a.activeDialog.Init()
+}
+
+// closeActiveDialog closes the current dialog
+func (a *App) closeActiveDialog() {
+	a.activeDialog = nil
+	a.state.PopDialog()
 }

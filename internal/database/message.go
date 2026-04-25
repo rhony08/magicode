@@ -185,6 +185,93 @@ func (s *MessageStorage) DeleteBySession(ctx context.Context, sessionID string) 
 	return s.db.Exec(ctx, query, sessionID)
 }
 
+// ListPaginated retrieves messages with cursor-based pagination
+// Returns the most recent messages first, along with pagination metadata
+// cursor is the timestamp (in milliseconds) to load messages older than this
+// If cursor is 0, loads the most recent messages
+func (s *MessageStorage) ListPaginated(ctx context.Context, sessionID string, limit int, cursor int64) ([]Message, int64, bool, error) {
+	var query string
+	var args []interface{}
+
+	if cursor == 0 {
+		// Initial load: get most recent messages
+		query = `
+		SELECT id, session_id, time_created, time_updated, data
+		FROM message WHERE session_id = ? 
+		ORDER BY time_created DESC LIMIT ?`
+		args = []interface{}{sessionID, limit}
+	} else {
+		// Load more: get messages older than cursor timestamp
+		query = `
+		SELECT id, session_id, time_created, time_updated, data
+		FROM message WHERE session_id = ? AND time_created < ?
+		ORDER BY time_created DESC LIMIT ?`
+		args = []interface{}{sessionID, cursor, limit}
+	}
+
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("failed to list messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		var dataStr string
+
+		err := rows.Scan(
+			&message.ID, &message.SessionID,
+			&message.Timestamps.TimeCreated, &message.Timestamps.TimeUpdated,
+			&dataStr,
+		)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("failed to scan message: %w", err)
+		}
+
+		// Deserialize JSON field
+		if err := json.Unmarshal([]byte(dataStr), &message.Data); err != nil {
+			return nil, 0, false, fmt.Errorf("failed to unmarshal data: %w", err)
+		}
+
+		messages = append(messages, message)
+	}
+
+	// Reverse to get chronological order (oldest first)
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	// Determine next cursor (timestamp of oldest message in this batch)
+	var nextCursor int64
+	var complete bool
+
+	if len(messages) < limit {
+		// Less than limit means no more messages
+		complete = true
+	} else if len(messages) > 0 {
+		// Next cursor is the timestamp of the oldest message in this batch (first after reversal)
+		nextCursor = messages[0].Timestamps.TimeCreated
+		complete = false
+	}
+
+	return messages, nextCursor, complete, nil
+}
+
+// Count returns the total message count for a session
+func (s *MessageStorage) Count(ctx context.Context, sessionID string) (int, error) {
+	query := `SELECT COUNT(*) FROM message WHERE session_id = ?`
+	row := s.db.QueryRow(ctx, query, sessionID)
+
+	var count int
+	err := row.Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count messages: %w", err)
+	}
+
+	return count, nil
+}
+
 // ===========================================
 // Part Storage
 // ===========================================

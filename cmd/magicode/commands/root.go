@@ -1,3 +1,4 @@
+// Package commands provides CLI commands.
 package commands
 
 import (
@@ -143,6 +144,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	var initialMessages []tui.Message
 	var sessionTitle string
 	var sessionDirectory string
+	var cursor int64  // Pagination cursor (timestamp in milliseconds)
+	var complete bool // Whether all messages loaded
 
 	// If session ID provided, load it to get the directory and messages
 	if sessionID != "" {
@@ -172,15 +175,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		log.Info("Directory", "path", directory)
 		log.Info("Title", "title", session.Title)
 
-		// Load messages from database
+		// Load messages from database with pagination (matching OpenCode)
 		messageStorage := database.NewMessageStorage(db)
 		partStorage := database.NewPartStorage(db)
 
-		dbMessages, err := messageStorage.List(ctx, sessionID)
+		// Use InitialMessagePageSize for initial load (80 messages, matching OpenCode)
+		dbMessages, cursor, complete, err := messageStorage.ListPaginated(ctx, sessionID, tui.InitialMessagePageSize, 0)
 		if err != nil {
 			log.Warn("Failed to load messages", "error", err.Error())
 		} else {
-			log.Info("Loaded messages from session", "count", len(dbMessages))
+			log.Info("Loaded messages from session", "count", len(dbMessages), "cursor", cursor, "complete", complete)
 
 			// Convert database messages to TUI messages
 			for _, dbMsg := range dbMessages {
@@ -240,6 +244,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		Title:           title,
 		InitialMessages: initialMessages,
 		SessionID:       sessionID,
+		MessageMeta: tui.MessageMeta{
+			Cursor:   cursor,
+			Complete: complete,
+			Limit:    len(initialMessages),
+			Loading:  false,
+		},
+		DatabasePath: global.DatabasePath(),
 	}
 
 	// If continuing a session, pass it to TUI
@@ -314,9 +325,23 @@ func convertDBMessageToTUI(dbMsg database.Message) tui.Message {
 }
 
 // convertPartsToTUI converts database parts to TUI parts
+// Note: Filters out internal parts (patch, step-start, step-finish) that shouldn't be displayed
+// This matches OpenCode's SKIP_PARTS behavior in sync.tsx
 func convertPartsToTUI(parts []database.Part) []tui.Part {
+	// SKIP_PARTS - internal parts that shouldn't be displayed (matches OpenCode)
+	skipParts := map[string]bool{
+		"patch":       true,
+		"step-start":  true,
+		"step-finish": true,
+	}
+
 	var result []tui.Part
 	for _, p := range parts {
+		// Skip internal parts that shouldn't be rendered
+		if skipParts[p.Data.Type] {
+			continue
+		}
+
 		tuiPart := tui.Part{
 			ID:     p.ID,
 			Type:   p.Data.Type,

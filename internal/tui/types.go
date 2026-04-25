@@ -8,6 +8,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ===========================================
+// Styles (for backward compatibility)
+// ===========================================
+
 // Styles
 var (
 	// Colors
@@ -23,9 +27,9 @@ var (
 	colorBorder     = lipgloss.Color("#374151")
 
 	// Base styles
-	styleNormal = lipgloss.NewStyle()
-	styleBold   = lipgloss.NewStyle().Bold(true)
-	styleText   = lipgloss.NewStyle().Foreground(colorText)
+	styleNormal    = lipgloss.NewStyle()
+	styleBold      = lipgloss.NewStyle().Bold(true)
+	styleText      = lipgloss.NewStyle().Foreground(colorText)
 	styleTextMuted = lipgloss.NewStyle().Foreground(colorTextMuted)
 
 	// Component styles
@@ -39,17 +43,17 @@ var (
 			Bold(true)
 
 	styleUserMessage = lipgloss.NewStyle().
-			Foreground(colorText).
-			Padding(0, 1, 0, 2)
+				Foreground(colorText).
+				Padding(0, 1, 0, 2)
 
 	styleAssistantMessage = lipgloss.NewStyle().
 				Foreground(colorSecondary).
 				Padding(0, 1, 0, 2)
 
 	styleSystemMessage = lipgloss.NewStyle().
-			Foreground(colorTextMuted).
-			Italic(true).
-			Padding(0, 1)
+				Foreground(colorTextMuted).
+				Italic(true).
+				Padding(0, 1)
 
 	styleError = lipgloss.NewStyle().
 			Foreground(colorError).
@@ -73,13 +77,13 @@ var (
 			Padding(1, 2)
 
 	styleSessionItem = lipgloss.NewStyle().
-			Foreground(colorText).
-			Padding(0, 1)
+				Foreground(colorText).
+				Padding(0, 1)
 
 	styleSessionActive = lipgloss.NewStyle().
-			Foreground(colorPrimary).
-			Bold(true).
-			Padding(0, 1)
+				Foreground(colorPrimary).
+				Bold(true).
+				Padding(0, 1)
 
 	styleHelp = lipgloss.NewStyle().
 			Foreground(colorTextMuted).
@@ -105,7 +109,11 @@ var (
 			Padding(0, 1)
 )
 
-// Message types
+// ===========================================
+// Local Types (not in types package)
+// ===========================================
+
+// Message types for Bubble Tea
 type (
 	// Msg is a generic message
 	Msg tea.Msg
@@ -127,17 +135,17 @@ type (
 
 	// ToolCallMsg is a tool call event
 	ToolCallMsg struct {
-		Tool    string
-		Input   string
-		Result  string
-		Status  string // "pending", "running", "success", "error"
+		Tool   string
+		Input  string
+		Result string
+		Status string // "pending", "running", "success", "error"
 	}
 
 	// SessionMsg is a session event
 	SessionMsg struct {
-		ID      string
-		Title   string
-		Action  string // "create", "delete", "switch"
+		ID     string
+		Title  string
+		Action string // "create", "delete", "switch"
 	}
 
 	// ErrorMsg is an error message
@@ -151,58 +159,6 @@ type (
 		Height int
 	}
 )
-
-// Role represents message role
-type Role string
-
-const (
-	RoleUser      Role = "user"
-	RoleAssistant Role = "assistant"
-	RoleSystem    Role = "system"
-	RoleTool      Role = "tool"
-)
-
-// Message represents a chat message
-type Message struct {
-	ID        string
-	Role      Role
-	Content   string
-	Timestamp time.Time
-	ToolCall  *ToolCall
-	// Additional fields for loaded messages
-	Model     string
-	Provider  string
-	Parts     []Part  // For assistant messages with multiple parts
-}
-
-// Part represents a part of a message (for assistant responses)
-type Part struct {
-	ID         string
-	Type       string  // text, tool_use, tool_result
-	Text       string  // For text parts
-	ToolID     string  // For tool parts
-	ToolName   string  // For tool parts
-	ToolInput  string  // JSON string of input
-	ToolResult string  // For tool_result
-	Status     string  // pending, running, success, error
-}
-
-// ToolCall represents a tool call
-type ToolCall struct {
-	Tool   string
-	Input  string
-	Result string
-	Status string
-}
-
-// Session represents a session
-type Session struct {
-	ID        string
-	Title     string
-	Directory string
-	CreatedAt time.Time
-	Active    bool
-}
 
 // ViewState represents the current view
 type ViewState string
@@ -230,5 +186,20 @@ type LoadMessagesRequest struct {
 // LoadMessagesResult is the result of loading messages
 type LoadMessagesResult struct {
 	Messages []Message
+	Error    error
+}
+
+// LoadMoreMessagesRequest is a command to load more messages (history)
+type LoadMoreMessagesRequest struct {
+	SessionID string
+	Cursor    int64 // Timestamp (ms) to load older messages before this
+	Limit     int   // Number of messages to load
+}
+
+// LoadMoreMessagesResult is the result of loading more messages
+type LoadMoreMessagesResult struct {
+	Messages []Message
+	Cursor   int64 // Next cursor for loading more (timestamp)
+	Complete bool  // True when all messages loaded
 	Error    error
 }
