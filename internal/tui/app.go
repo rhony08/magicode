@@ -298,14 +298,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Dialog selection
 	case dialog.SelectMsg:
-		a.handleDialogSelection(msg)
+		cmd := a.handleDialogSelection(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 		// Update active dialog
 		if a.activeDialog != nil {
-			var cmd tea.Cmd
-			a.activeDialog, cmd = a.activeDialog.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
+			var dialogCmd tea.Cmd
+			a.activeDialog, dialogCmd = a.activeDialog.Update(msg)
+			if dialogCmd != nil {
+				cmds = append(cmds, dialogCmd)
 			}
 			// Don't process other keys when dialog is open
 			return a, tea.Batch(cmds...)
@@ -328,10 +331,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.spinner.Style = lipgloss.NewStyle().Foreground(a.theme.Spinner)
 	}
 
-	// Update input if in input mode
+	// Update prompt input if in input mode
 	if a.mode == ModeInput {
-		var cmd tea.Cmd
-		a.input, cmd = a.input.Update(msg)
+		_, cmd := a.prompt.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -737,19 +739,20 @@ func (a *App) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleDialogSelection handles selection from a dialog
-func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
+func (a *App) handleDialogSelection(msg dialog.SelectMsg) tea.Cmd {
 	switch msg.Type {
 	case DialogSessionList:
 		if msg.Data != nil {
 			// Check if "new" was selected
 			if msg.Data == "new" {
 				// Create new session - handled by command
-				return
+				return nil
 			}
 			// Otherwise it's a session selection
 			if session, ok := msg.Data.(Session); ok {
 				a.state.SetActiveSession(&session)
 				a.activeDialog = nil
+				a.state.PopDialog()
 			}
 		}
 
@@ -758,6 +761,7 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
 			if modelKey, ok := msg.Data.(ModelKey); ok {
 				a.state.SetCurrentModel(modelKey)
 				a.activeDialog = nil
+				a.state.PopDialog()
 			}
 		}
 
@@ -771,6 +775,7 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
 				a.spinner.Style = lipgloss.NewStyle().Foreground(a.theme.Spinner)
 				a.state.SetStatus(fmt.Sprintf("Theme changed to %s", themeID))
 				a.activeDialog = nil
+				a.state.PopDialog()
 				// Save theme preference to database
 				if err := a.saveThemePreference(themeID); err != nil {
 					log.Warn("Failed to save theme preference", "error", err, "theme", themeID)
@@ -783,12 +788,18 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
 			if action, ok := msg.Data.(string); ok {
 				a.state.SetStatus(fmt.Sprintf("Command: %s", action))
 				a.activeDialog = nil
+				a.state.PopDialog()
+				// Execute the action via leader action handler
+				_, cmd := a.handleLeaderAction(&LeaderKeyMsg{Action: action})
+				return cmd
 			}
 		}
 
 	default:
 		a.activeDialog = nil
+		a.state.PopDialog()
 	}
+	return nil
 }
 
 // handleDialogSelect handles the old DialogState format (for compatibility)
@@ -892,7 +903,7 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.showCommandPaletteDialog()
 	}
 
-	// Pass to input if in input mode and not a control key
+	// Pass to prompt's input if in input mode and not a control key
 	// This handles regular typing
 	log.Info("Reached input section", "mode", a.mode, "isModeInput", a.mode == ModeInput)
 	if a.mode == ModeInput {
@@ -900,18 +911,17 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Only pass printable characters and essential editing keys to input
 		switch msg.Type {
 		case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyLeft, tea.KeyRight:
-			log.Info("Key type matches, updating input")
-			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg)
-			log.Info("Input updated", "newValue", a.input.Value())
+			log.Info("Key type matches, updating prompt input")
+			// Update the prompt's internal input by passing the message to it
+			_, cmd := a.prompt.Update(msg)
+			log.Info("Prompt input updated", "newValue", a.prompt.GetValue())
 			return a, cmd
 		}
 		// Also handle keys with runes
 		if msg.Runes != nil && len(msg.Runes) > 0 {
-			log.Info("Key has runes, updating input")
-			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg)
-			log.Info("Input updated (via runes)", "newValue", a.input.Value())
+			log.Info("Key has runes, updating prompt input")
+			_, cmd := a.prompt.Update(msg)
+			log.Info("Prompt input updated (via runes)", "newValue", a.prompt.GetValue())
 			return a, cmd
 		}
 		log.Info("Key did not match input criteria")
@@ -966,7 +976,7 @@ func (a *App) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // submitInput submits the current input
 func (a *App) submitInput() (tea.Model, tea.Cmd) {
-	content := strings.TrimSpace(a.input.Value())
+	content := strings.TrimSpace(a.prompt.GetValue())
 	if content == "" {
 		return a, nil
 	}
@@ -983,7 +993,7 @@ func (a *App) submitInput() (tea.Model, tea.Cmd) {
 	a.state.Local.HistoryIndex = len(a.state.Local.InputHistory)
 
 	// Clear input
-	a.input.Reset()
+	a.prompt.Clear()
 
 	// Set waiting state
 	a.state.Processing = true
@@ -1203,7 +1213,7 @@ func (a *App) setError(err error) {
 func (a *App) navigateHistoryUp() tea.Model {
 	if a.state.Local.HistoryIndex > 0 {
 		a.state.Local.HistoryIndex--
-		a.input.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
+		a.prompt.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
 	}
 	return a
 }
@@ -1213,9 +1223,9 @@ func (a *App) navigateHistoryDown() tea.Model {
 	if a.state.Local.HistoryIndex < len(a.state.Local.InputHistory) {
 		a.state.Local.HistoryIndex++
 		if a.state.Local.HistoryIndex < len(a.state.Local.InputHistory) {
-			a.input.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
+			a.prompt.SetValue(a.state.Local.InputHistory[a.state.Local.HistoryIndex])
 		} else {
-			a.input.Reset()
+			a.prompt.Clear()
 		}
 	}
 	return a
