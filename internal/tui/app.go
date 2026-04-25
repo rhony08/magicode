@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1087,9 +1088,43 @@ func (a *App) loadSessionsFromDB() tea.Cmd {
 
 		log.Info("Loaded sessions from database", "count", len(sessions))
 
+		// Check for old OpenCode file-based storage
+		if len(sessions) == 0 {
+			a.checkForFileBasedStorage()
+		}
+
 		// Update state with loaded sessions
 		a.state.Sync.Sessions = sessions
 		return nil
+	}
+}
+
+// checkForFileBasedStorage checks if old OpenCode v1.2 file-based storage exists
+func (a *App) checkForFileBasedStorage() {
+	// Get the data directory from database path
+	dataDir := filepath.Dir(a.databasePath)
+	storageDir := filepath.Join(dataDir, "storage", "session")
+
+	if _, err := os.Stat(storageDir); err == nil {
+		// Directory exists, count session directories
+		entries, err := os.ReadDir(storageDir)
+		if err == nil && len(entries) > 0 {
+			// Count actual session directories (excluding "global")
+			sessionCount := 0
+			for _, entry := range entries {
+				if entry.IsDir() && entry.Name() != "global" {
+					sessionCount++
+				}
+			}
+
+			if sessionCount > 0 {
+				log.Warn("Found OpenCode v1.2 file-based storage", "path", storageDir, "count", sessionCount)
+				log.Warn("These sessions are not compatible with the current SQLite format")
+				log.Warn("OpenCode v1.2 uses file-based storage, v1.3+ uses SQLite")
+				log.Warn("Use 'magicode migrate' to import old sessions (coming soon)")
+				a.state.SetStatus(fmt.Sprintf("Found %d sessions in old format (use 'magicode migrate')", sessionCount))
+			}
+		}
 	}
 }
 
