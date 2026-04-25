@@ -262,5 +262,5 @@ func formatTime(t time.Time) string {
 		return fmt.Sprintf("%dd ago", int(diff.Hours()/24))
 	}
 
-	return t.Format("Jan %d")
+	return t.Format("Jan 2")
 }

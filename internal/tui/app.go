@@ -753,6 +753,8 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) tea.Cmd {
 				a.state.SetActiveSession(&session)
 				a.activeDialog = nil
 				a.state.PopDialog()
+				// Load messages for the selected session
+				return a.loadMessagesForSession(session.ID)
 			}
 		}
 
@@ -1171,6 +1173,47 @@ func (a *App) loadSessionsFromDB() tea.Cmd {
 
 		// Update state with loaded sessions
 		a.state.Sync.Sessions = allSessions
+		return nil
+	}
+}
+
+// loadMessagesForSession loads messages for a specific session from the database
+func (a *App) loadMessagesForSession(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if sessionID == "" || a.databasePath == "" {
+			return nil
+		}
+
+		log.Info("Loading messages for session", "sessionID", sessionID)
+
+		ctx := context.Background()
+		db, err := database.New(ctx, database.Config{Path: a.databasePath})
+		if err != nil {
+			log.Error("Failed to open database for loading messages", "error", err.Error())
+			return nil
+		}
+		defer db.Close()
+
+		messageStorage := database.NewMessageStorage(db)
+		messages, _, _, err := messageStorage.ListPaginated(ctx, sessionID, 80, 0)
+		if err != nil {
+			log.Error("Failed to load messages from database", "error", err.Error())
+			return nil
+		}
+
+		log.Info("Loaded messages for session", "sessionID", sessionID, "count", len(messages))
+
+		// Convert database messages to UI messages
+		uiMessages := make([]Message, 0, len(messages))
+		for _, dbMsg := range messages {
+			uiMsg := convertDBMessageToTUI(dbMsg)
+			uiMessages = append(uiMessages, uiMsg)
+		}
+
+		// Update state with loaded messages
+		a.state.Sync.Messages = uiMessages
+		a.state.SetStatus(fmt.Sprintf("Loaded %d messages", len(uiMessages)))
+
 		return nil
 	}
 }
