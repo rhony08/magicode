@@ -143,9 +143,11 @@ type (
 
 	// SessionMsg is a session event
 	SessionMsg struct {
-		ID     string
-		Title  string
-		Action string // "create", "delete", "switch"
+		ID        string
+		Title     string
+		Directory string
+		Action    string // "create", "delete", "switch", "error"
+		Error     string // Error message if Action is "error"
 	}
 
 	// ErrorMsg is an error message

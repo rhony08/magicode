@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/tui/dialog"
 	"github.com/rhony08/magicode/internal/tui/layout"
@@ -28,6 +30,9 @@ type App struct {
 
 	// Database path for message loading
 	databasePath string
+
+	// Working directory for session creation
+	workingDirectory string
 
 	// UI components - layout package
 	sidebar       *layout.Sidebar
@@ -74,6 +79,19 @@ type Config struct {
 	Directory       string      // Working directory
 	MessageMeta     MessageMeta // Pagination metadata for initial load
 	DatabasePath    string      // Database path for loading more messages
+}
+
+// workingDirectory returns the working directory from config or current directory
+func (c Config) workingDirectory() string {
+	if c.Directory != "" {
+		return c.Directory
+	}
+	// Try to get current directory
+	wd, err := os.Getwd()
+	if err == nil {
+		return wd
+	}
+	return "."
 }
 
 // NewApp creates a new TUI application with layered state management
@@ -134,24 +152,25 @@ func NewApp(cfg Config) *App {
 	keybindHints := layout.NewKeybindHintBar(theme)
 
 	app := &App{
-		state:           state,
-		theme:           theme,
-		styles:          styles,
-		databasePath:    cfg.DatabasePath,
-		sidebar:         sidebar,
-		mobileSidebar:   mobileSidebar,
-		footer:          footer,
-		statusBar:       statusBar,
-		prompt:          prompt,
-		keybindHints:    keybindHints,
-		leaderHandler:   NewLeaderKeyHandler(),
-		input:           ti,
-		spinner:         s,
-		messageViewport: vp,
-		view:            ViewChat,
-		mode:            ModeInput,
-		helpContent:     help,
-		keybindings:     DefaultKeybindings(),
+		state:            state,
+		theme:            theme,
+		styles:           styles,
+		databasePath:     cfg.DatabasePath,
+		workingDirectory: cfg.workingDirectory(),
+		sidebar:          sidebar,
+		mobileSidebar:    mobileSidebar,
+		footer:           footer,
+		statusBar:        statusBar,
+		prompt:           prompt,
+		keybindHints:     keybindHints,
+		leaderHandler:    NewLeaderKeyHandler(),
+		input:            ti,
+		spinner:          s,
+		messageViewport:  vp,
+		view:             ViewChat,
+		mode:             ModeInput,
+		helpContent:      help,
+		keybindings:      DefaultKeybindings(),
 	}
 
 	return app
@@ -162,6 +181,7 @@ func (a *App) Init() tea.Cmd {
 	return tea.Batch(
 		a.spinner.Tick,
 		textinput.Blink,
+		a.loadSessionsFromDB(), // Load sessions from database on startup
 	)
 }
 
@@ -933,19 +953,53 @@ func (a *App) sendMessage(content string) tea.Cmd {
 	}
 }
 
-// createSession creates a new session
+// createSession creates a new session and persists it to the database
 func (a *App) createSession() tea.Cmd {
 	return func() tea.Msg {
-		session := Session{
-			ID:        fmt.Sprintf("session-%d", time.Now().Unix()),
-			Title:     "New Session",
-			CreatedAt: time.Now(),
-			Active:    true,
+		// Create session in database
+		ctx := context.Background()
+		db, err := database.New(ctx, database.Config{Path: a.databasePath})
+		if err != nil {
+			log.Error("Failed to open database for session creation", "error", err.Error())
+			return SessionMsg{
+				ID:     "",
+				Title:  "",
+				Action: "error",
+				Error:  fmt.Sprintf("Failed to open database: %v", err),
+			}
 		}
+		defer db.Close()
+
+		sessionStorage := database.NewSessionStorage(db)
+
+		// Create the database session
+		dbSession := database.Session{
+			ID:        uuid.New().String(),
+			ProjectID: "default-project", // TODO: Get actual project ID
+			Slug:      fmt.Sprintf("session-%d", time.Now().Unix()),
+			Directory: a.workingDirectory,
+			Title:     "New Session",
+			Version:   "1",
+		}
+
+		createdSession, err := sessionStorage.Create(ctx, dbSession)
+		if err != nil {
+			log.Error("Failed to create session", "error", err.Error())
+			return SessionMsg{
+				ID:     "",
+				Title:  "",
+				Action: "error",
+				Error:  fmt.Sprintf("Failed to create session: %v", err),
+			}
+		}
+
+		log.Info("Created session in database", "id", createdSession.ID, "directory", createdSession.Directory)
+
 		return SessionMsg{
-			ID:     session.ID,
-			Title:  session.Title,
-			Action: "create",
+			ID:        createdSession.ID,
+			Title:     createdSession.Title,
+			Directory: createdSession.Directory,
+			Action:    "create",
 		}
 	}
 }
@@ -957,11 +1011,16 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 		session := Session{
 			ID:        msg.ID,
 			Title:     msg.Title,
+			Directory: msg.Directory,
 			CreatedAt: time.Now(),
 			Active:    true,
 		}
 		a.state.Sync.Sessions = append(a.state.Sync.Sessions, session)
 		a.state.SetActiveSession(&session)
+		a.state.SetStatus(fmt.Sprintf("Created session: %s", msg.Title))
+
+	case "error":
+		a.state.SetStatus(fmt.Sprintf("Session error: %s", msg.Error))
 
 	case "delete":
 		for i, s := range a.state.Sync.Sessions {
@@ -978,6 +1037,46 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 				break
 			}
 		}
+	}
+}
+
+// loadSessionsFromDB loads sessions from the database
+func (a *App) loadSessionsFromDB() tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		db, err := database.New(ctx, database.Config{Path: a.databasePath})
+		if err != nil {
+			log.Error("Failed to open database for loading sessions", "error", err.Error())
+			return nil
+		}
+		defer db.Close()
+
+		sessionStorage := database.NewSessionStorage(db)
+
+		// Load sessions from database (all sessions, not filtered by directory)
+		dbSessions, err := sessionStorage.ListAll(ctx)
+		if err != nil {
+			log.Error("Failed to load sessions from database", "error", err.Error())
+			return nil
+		}
+
+		// Convert database sessions to TUI sessions
+		var sessions []Session
+		for _, dbSession := range dbSessions {
+			sessions = append(sessions, Session{
+				ID:        dbSession.ID,
+				Title:     dbSession.Title,
+				Directory: dbSession.Directory,
+				CreatedAt: time.UnixMilli(dbSession.Timestamps.TimeCreated),
+				Active:    false, // Will be set by SetActiveSession if needed
+			})
+		}
+
+		log.Info("Loaded sessions from database", "count", len(sessions))
+
+		// Update state with loaded sessions
+		a.state.Sync.Sessions = sessions
+		return nil
 	}
 }
 
@@ -1391,10 +1490,17 @@ func (a *App) handleLeaderAction(msg *LeaderKeyMsg) (tea.Model, tea.Cmd) {
 
 // showSessionListDialog opens the session list dialog
 func (a *App) showSessionListDialog() tea.Cmd {
-	a.activeDialog = dialog.NewSessionListDialog(a.theme, &a.state)
-	a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
-	a.state.PushDialog(DialogSessionList)
-	return a.activeDialog.Init()
+	return tea.Batch(
+		// First load sessions from database
+		a.loadSessionsFromDB(),
+		// Then show the dialog
+		func() tea.Msg {
+			a.activeDialog = dialog.NewSessionListDialog(a.theme, &a.state)
+			a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
+			a.state.PushDialog(DialogSessionList)
+			return nil
+		},
+	)
 }
 
 // showModelListDialog opens the model list dialog
