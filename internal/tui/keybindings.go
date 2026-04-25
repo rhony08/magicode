@@ -21,13 +21,13 @@ func (kb *Keybinding) Match(msg tea.KeyMsg) bool {
 	if msg.Type == kb.Key {
 		return true
 	}
-	
+
 	// Check string match (this handles ctrl+key, alt+key, etc.)
 	msgStr := msg.String()
 	if msgStr == kb.Str {
 		return true
 	}
-	
+
 	// For Ctrl keys, also check without the ctrl+ prefix
 	if kb.Ctrl {
 		baseKey := strings.TrimPrefix(kb.Str, "ctrl+")
@@ -36,28 +36,29 @@ func (kb *Keybinding) Match(msg tea.KeyMsg) bool {
 			return strings.Contains(msgStr, baseKey) && strings.Contains(msgStr, "ctrl")
 		}
 	}
-	
+
 	return false
 }
 
 // Keybindings holds all keybindings
 type Keybindings struct {
-	Submit     Keybinding
-	Quit       Keybinding
-	Back       Keybinding
-	Sessions   Keybinding
-	Help       Keybinding
-	NewSession Keybinding
-	Up         Keybinding
-	Down       Keybinding
-	PageUp     Keybinding
-	PageDown   Keybinding
-	HistoryUp  Keybinding
-	HistoryDown Keybinding
-	Select     Keybinding
-	Cancel     Keybinding
-	Tab        Keybinding
-	ShiftTab   Keybinding
+	Submit         Keybinding
+	Quit           Keybinding
+	Back           Keybinding
+	Sessions       Keybinding
+	Help           Keybinding
+	NewSession     Keybinding
+	Up             Keybinding
+	Down           Keybinding
+	PageUp         Keybinding
+	PageDown       Keybinding
+	HistoryUp      Keybinding
+	HistoryDown    Keybinding
+	Select         Keybinding
+	Cancel         Keybinding
+	Tab            Keybinding
+	ShiftTab       Keybinding
+	CommandPalette Keybinding
 }
 
 // DefaultKeybindings returns the default keybindings
@@ -75,15 +76,15 @@ func DefaultKeybindings() Keybindings {
 			Str: "esc",
 		},
 		Sessions: Keybinding{
-			Str: "ctrl+s",
+			Str:  "ctrl+s",
 			Ctrl: true,
 		},
 		Help: Keybinding{
-			Str: "ctrl+h",
+			Str:  "ctrl+h",
 			Ctrl: true,
 		},
 		NewSession: Keybinding{
-			Str: "ctrl+n",
+			Str:  "ctrl+n",
 			Ctrl: true,
 		},
 		Up: Keybinding{
@@ -103,11 +104,11 @@ func DefaultKeybindings() Keybindings {
 			Str: "pgdown",
 		},
 		HistoryUp: Keybinding{
-			Str: "ctrl+up",
+			Str:  "ctrl+up",
 			Ctrl: true,
 		},
 		HistoryDown: Keybinding{
-			Str: "ctrl+down",
+			Str:  "ctrl+down",
 			Ctrl: true,
 		},
 		Select: Keybinding{
@@ -125,28 +126,33 @@ func DefaultKeybindings() Keybindings {
 			Key: tea.KeyShiftTab,
 			Str: "shift+tab",
 		},
+		CommandPalette: Keybinding{
+			Str:  "ctrl+p",
+			Ctrl: true,
+		},
 	}
 }
 
 // KeyNames returns human-readable key names
 func KeyNames(kb Keybindings) map[string]string {
 	return map[string]string{
-		"submit":     "Enter",
-		"quit":       "Ctrl+C / q",
-		"back":       "Esc",
-		"sessions":   "Ctrl+S",
-		"help":       "Ctrl+H",
-		"newSession": "Ctrl+N",
-		"up":         "↑",
-		"down":       "↓",
-		"pageUp":     "PgUp",
-		"pageDown":   "PgDn",
-		"historyUp":  "Ctrl+↑",
-		"historyDown": "Ctrl+↓",
-		"select":     "Enter",
-		"cancel":     "Esc",
-		"tab":        "Tab",
-		"shiftTab":   "Shift+Tab",
+		"submit":         "Enter",
+		"quit":           "Ctrl+C / q",
+		"back":           "Esc",
+		"sessions":       "Ctrl+S",
+		"help":           "Ctrl+H",
+		"newSession":     "Ctrl+N",
+		"up":             "↑",
+		"down":           "↓",
+		"pageUp":         "PgUp",
+		"pageDown":       "PgDn",
+		"historyUp":      "Ctrl+↑",
+		"historyDown":    "Ctrl+↓",
+		"select":         "Enter",
+		"cancel":         "Esc",
+		"tab":            "Tab",
+		"shiftTab":       "Shift+Tab",
+		"commandPalette": "Ctrl+P",
 	}
 }
 

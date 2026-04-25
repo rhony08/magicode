@@ -772,6 +772,14 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) {
 			}
 		}
 
+	case DialogCommand:
+		if msg.Data != nil {
+			if action, ok := msg.Data.(string); ok {
+				a.state.SetStatus(fmt.Sprintf("Command: %s", action))
+				a.activeDialog = nil
+			}
+		}
+
 	default:
 		a.activeDialog = nil
 	}
@@ -865,6 +873,9 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.state.SetStatus("Cancelled")
 		}
 		return a, nil
+
+	case kb.CommandPalette.Match(msg):
+		return a, a.showCommandPaletteDialog()
 	}
 
 	// Pass to input if in input mode
@@ -1584,6 +1595,14 @@ func (a *App) showStatusDialog() tea.Cmd {
 		len(a.state.Sync.Messages),
 		a.state.KV.Theme))
 	return nil
+}
+
+// showCommandPaletteDialog opens the command palette dialog
+func (a *App) showCommandPaletteDialog() tea.Cmd {
+	a.activeDialog = dialog.NewCommandPaletteDialog(a.theme, nil)
+	a.activeDialog.SetDimensions(a.state.Layout.Width, a.state.Layout.Height)
+	a.state.PushDialog(DialogCommand)
+	return a.activeDialog.Init()
 }
 
 // saveThemePreference saves the theme preference to the database
