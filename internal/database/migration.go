@@ -16,6 +16,7 @@ func (d *Database) migrate(ctx context.Context) error {
 	// Run all migrations in order
 	migrations := []migration{
 		{"001_initial", d.migrateInitial},
+		{"002_kv_table", d.migrateKVTable},
 		// Future migrations can be added here
 	}
 
@@ -311,4 +312,23 @@ func (d *Database) createIndexes(ctx context.Context, db *Database) error {
 		}
 	}
 	return nil
+}
+
+// migrateKVTable creates the KV table for persistent preferences
+func (d *Database) migrateKVTable(ctx context.Context, db *Database) error {
+	kvSchema := `
+	CREATE TABLE IF NOT EXISTS kv (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		time_created INTEGER NOT NULL,
+		time_updated INTEGER NOT NULL
+	)`
+
+	if err := db.Exec(ctx, kvSchema); err != nil {
+		return err
+	}
+
+	// Create index on time_updated for cleanup operations
+	index := `CREATE INDEX IF NOT EXISTS kv_time_updated_idx ON kv(time_updated)`
+	return db.Exec(ctx, index)
 }
