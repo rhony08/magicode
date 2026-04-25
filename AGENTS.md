@@ -114,15 +114,24 @@ internal/tui/
 - ✅ Phase 5.2: Theme File Loading - Load custom themes from ~/.config/magicode/themes/*.json
 - ✅ Phase 5.3: Theme Switching Dialog - Ctrl+X t to open theme list dialog
 - ✅ Phase 5.4: Theme Persistence - Save/load theme preference to KVStore (SQLite)
+- ✅ Phase 6.1: Tool Result Rendering - Bash, Read, Write, Edit, Glob, Grep, TodoWrite with diff view
+- ✅ Phase 6.2: Markdown Rendering - Full markdown support with syntax highlighting
+- ✅ Phase 6.3: Command Palette - Ctrl+P searchable command list
+- ✅ Phase 6.4: Undo/Redo - Message history undo/redo with stack management
+- ✅ Phase 7.1: Animations - Dialog open/close, toast, and scroll animations
+- ✅ Phase 7.2: Sound Notifications - Terminal bell support for completion
+- ✅ Phase 7.3: Clipboard Support - Cross-platform clipboard operations (Ctrl+X y)
+- ✅ Phase 7.4: Help Dialog - Comprehensive keyboard shortcuts reference
 - ✅ File Storage Tests - Comprehensive tests for OpenCode v1.2 file-based storage adapter
 - ✅ KV Storage Tests - Tests for KV storage with theme preferences
+- ✅ Animation Tests - Tests for animation system
+- ✅ Clipboard Tests - Tests for clipboard operations
 
 ### In Progress
-- None (Phase 5 complete)
+- None (All phases complete!)
 
 ### Pending
-- ⏳ Phase 6: Advanced Features (tool result rendering, markdown, undo/redo)
-- ⏳ Phase 7: Polish (animations, sound, clipboard)
+- None (All phases complete!)
 
 ## Key Patterns from OpenCode
 
