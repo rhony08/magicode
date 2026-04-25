@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/opencode"
+	"github.com/rhony08/magicode/internal/tui/component"
 	"github.com/rhony08/magicode/internal/tui/dialog"
 	"github.com/rhony08/magicode/internal/tui/layout"
 	"github.com/rhony08/magicode/internal/util/log"
@@ -620,6 +621,9 @@ func (a *App) renderParts(parts []Part, model string) string {
 	}
 	lines = append(lines, a.styles.AssistantMessage.Render(header))
 
+	// Create tool result renderer
+	toolRenderer := component.NewToolResultRenderer(a.theme, a.styles)
+
 	for _, part := range parts {
 		switch part.Type {
 		case "text":
@@ -628,31 +632,14 @@ func (a *App) renderParts(parts []Part, model string) string {
 			}
 
 		case "tool_use":
-			toolLine := a.styles.ToolUse.Render(fmt.Sprintf("▶ %s", part.ToolName))
-			if part.ToolInput != "" {
-				input := part.ToolInput
-				if len(input) > 100 {
-					input = input[:100] + "..."
-				}
-				lines = append(lines, a.styles.TextMuted.Render(input))
-			}
-			lines = append(lines, toolLine)
+			// Use the new tool renderer for tool calls
+			toolCall := toolRenderer.RenderToolCall(part.ToolName, part.ToolInput)
+			lines = append(lines, toolCall)
 
 		case "tool_result":
-			statusStyle := a.styles.Success
-			if part.Status == "error" {
-				statusStyle = a.styles.Error
-			}
-
-			toolLine := statusStyle.Render(fmt.Sprintf("✓ %s (%s)", part.ToolName, part.Status))
-			if part.ToolResult != "" {
-				result := part.ToolResult
-				if len(result) > 200 {
-					result = result[:200] + "..."
-				}
-				lines = append(lines, a.styles.TextMuted.Render(result))
-			}
-			lines = append(lines, toolLine)
+			// Use the new tool renderer for tool results
+			toolResult := toolRenderer.RenderResult(part.ToolName, part.ToolInput, part.ToolResult, part.Status)
+			lines = append(lines, toolResult)
 
 		case "thinking":
 			if part.Text != "" {
