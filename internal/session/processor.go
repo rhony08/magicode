@@ -9,6 +9,7 @@ import (
 	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/provider"
+	"github.com/rhony08/magicode/internal/tool"
 	"github.com/rhony08/magicode/internal/util/log"
 )
 
@@ -44,22 +45,46 @@ var (
 
 // Processor handles AI message processing with streaming support
 type Processor struct {
-	registry *provider.ProviderRegistry
-	db       *database.Database
-	bus      *bus.Service
-	messages *database.MessageStorage
-	parts    *database.PartStorage
-	mu       sync.Mutex
-	active   map[string]context.CancelFunc // Active processing contexts by session ID
-	logger   *log.Logger
+	registry     *provider.ProviderRegistry
+	db           *database.Database
+	bus          *bus.Service
+	messages     *database.MessageStorage
+	parts        *database.PartStorage
+	toolRegistry *tool.Registry // Tool execution registry
+	mu           sync.Mutex
+	active       map[string]context.CancelFunc // Active processing contexts by session ID
+	logger       *log.Logger
 }
 
 // ProcessorConfig contains configuration for the processor
 type ProcessorConfig struct {
-	Registry *provider.ProviderRegistry
-	DB       *database.Database
-	Bus      *bus.Service
-	Logger   *log.Logger
+	Registry     *provider.ProviderRegistry
+	DB           *database.Database
+	Bus          *bus.Service
+	ToolRegistry *tool.Registry // Tool registry for execution
+	Logger       *log.Logger
+}
+
+// NewProcessor creates a new session processor
+func NewProcessor(config ProcessorConfig) *Processor {
+	if config.Logger == nil {
+		config.Logger = log.Create(map[string]string{"service": "session.processor"})
+	}
+
+	if config.ToolRegistry == nil {
+		config.ToolRegistry = tool.NewRegistry()
+	}
+
+	return &Processor{
+		registry:     config.Registry,
+		db:           config.DB,
+		bus:          config.Bus,
+		messages:     database.NewMessageStorage(config.DB),
+		parts:        database.NewPartStorage(config.DB),
+		toolRegistry: config.ToolRegistry,
+		active:       make(map[string]context.CancelFunc),
+		logger:       config.Logger,
+	}
 }
 
 // ProcessRequest contains all info for processing a message
@@ -71,23 +96,6 @@ type ProcessRequest struct {
 	History      []database.Message // Previous messages for context
 	Tools        []provider.ToolDefinition
 	Agent        string // Agent name (optional)
-}
-
-// NewProcessor creates a new session processor
-func NewProcessor(config ProcessorConfig) *Processor {
-	if config.Logger == nil {
-		config.Logger = log.Create(map[string]string{"service": "session.processor"})
-	}
-
-	return &Processor{
-		registry: config.Registry,
-		db:       config.DB,
-		bus:      config.Bus,
-		messages: database.NewMessageStorage(config.DB),
-		parts:    database.NewPartStorage(config.DB),
-		active:   make(map[string]context.CancelFunc),
-		logger:   config.Logger,
-	}
 }
 
 // Process streams response from AI, executes tools, stores results
@@ -475,4 +483,88 @@ func (p *Processor) IsProcessing(sessionID string) bool {
 	_, exists := p.active[sessionID]
 	p.mu.Unlock()
 	return exists
+}
+
+// GetToolDefinitions returns tool definitions in provider format
+func (p *Processor) GetToolDefinitions() []provider.ToolDefinition {
+	if p.toolRegistry == nil {
+		return nil
+	}
+
+	toolDefs := p.toolRegistry.ListDefinitions()
+	return ConvertToolDefinitions(toolDefs)
+}
+
+// ConvertToolDefinitions converts tool.ToolDefinition to provider.ToolDefinition
+func ConvertToolDefinitions(toolDefs []tool.ToolDefinition) []provider.ToolDefinition {
+	result := make([]provider.ToolDefinition, 0, len(toolDefs))
+
+	for _, td := range toolDefs {
+		// Convert parameter schema
+		inputSchema := make(map[string]interface{})
+		inputSchema["type"] = "object"
+
+		properties := make(map[string]interface{})
+		required := make([]string, 0)
+
+		for name, param := range td.Parameters {
+			prop := convertParameterSchema(param)
+			properties[name] = prop
+			if param.Required {
+				required = append(required, name)
+			}
+		}
+
+		inputSchema["properties"] = properties
+		if len(required) > 0 {
+			inputSchema["required"] = required
+		}
+
+		result = append(result, provider.ToolDefinition{
+			Name:        td.ID,
+			Description: td.Description,
+			InputSchema: inputSchema,
+		})
+	}
+
+	return result
+}
+
+// convertParameterSchema converts tool.ParameterSchema to JSON schema format
+func convertParameterSchema(param tool.ParameterSchema) map[string]interface{} {
+	result := map[string]interface{}{
+		"type":        param.Type,
+		"description": param.Description,
+	}
+
+	if param.Default != nil {
+		result["default"] = param.Default
+	}
+
+	if len(param.Enum) > 0 {
+		result["enum"] = param.Enum
+	}
+
+	if param.Type == "object" && len(param.Properties) > 0 {
+		props := make(map[string]interface{})
+		for name, p := range param.Properties {
+			props[name] = convertParameterSchema(p)
+		}
+		result["properties"] = props
+	}
+
+	if param.Type == "array" && param.Items != nil {
+		result["items"] = convertParameterSchema(*param.Items)
+	}
+
+	return result
+}
+
+// ExecuteTool executes a tool and returns the result
+func (p *Processor) ExecuteTool(ctx context.Context, toolName string, input map[string]interface{}, toolCtx tool.ToolContext) (*tool.ToolResult, error) {
+	if p.toolRegistry == nil {
+		return nil, fmt.Errorf("tool registry not configured")
+	}
+
+	return p.toolRegistry.Execute(tool.ToolID(toolName), toolCtx, input)
 }
