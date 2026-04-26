@@ -20,6 +20,7 @@ const (
 	ProviderCohere        ProviderID = "cohere"
 	ProviderTogetherAI    ProviderID = "togetherai"
 	ProviderPerplexity    ProviderID = "perplexity"
+	ProviderDeepInfra     ProviderID = "deepinfra"
 	ProviderGitHubCopilot ProviderID = "github-copilot"
 )
 
@@ -87,7 +88,7 @@ func (p ToolUsePart) ContentType() string { return "tool_use" }
 
 // ToolResultPart is a tool result content part
 type ToolResultPart struct {
-	Type      string `json:"type"`       // always "tool_result"
+	Type      string `json:"type"` // always "tool_result"
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error"`
@@ -97,7 +98,7 @@ func (p ToolResultPart) ContentType() string { return "tool_result" }
 
 // ContentMessage represents a message with structured content parts
 type ContentMessage struct {
-	Role    Role         `json:"role"`
+	Role    Role          `json:"role"`
 	Content []ContentPart `json:"content"`
 }
 
@@ -119,13 +120,13 @@ type ChatResponse struct {
 	Model   string `json:"model"`
 	Content string `json:"content"`
 	Role    Role   `json:"role"`
-	
+
 	// For responses with tool uses
 	ToolUses []ToolUse `json:"tool_uses,omitempty"`
-	
+
 	// Usage statistics
 	Usage Usage `json:"usage"`
-	
+
 	// Stop reason
 	StopReason string `json:"stop_reason"`
 }
@@ -144,8 +145,8 @@ type StreamEvent interface {
 
 // ContentBlockStartEvent marks the start of a content block
 type ContentBlockStartEvent struct {
-	Type        string `json:"type"` // "content_block_start"
-	Index       int    `json:"index"`
+	Type         string      `json:"type"` // "content_block_start"
+	Index        int         `json:"index"`
 	ContentBlock ContentPart `json:"content_block"`
 }
 
@@ -153,8 +154,8 @@ func (e ContentBlockStartEvent) EventType() string { return "content_block_start
 
 // ContentBlockDeltaEvent contains a delta for a content block
 type ContentBlockDeltaEvent struct {
-	Type  string `json:"type"` // "content_block_delta"
-	Index int    `json:"index"`
+	Type  string      `json:"type"` // "content_block_delta"
+	Index int         `json:"index"`
 	Delta ContentPart `json:"delta"`
 }
 
@@ -172,10 +173,10 @@ func (e ContentBlockStopEvent) EventType() string { return "content_block_stop" 
 type MessageStartEvent struct {
 	Type    string `json:"type"` // "message_start"
 	Message struct {
-		ID   string `json:"id"`
+		ID    string `json:"id"`
 		Model string `json:"model"`
-		Role Role   `json:"role"`
-		Usage Usage `json:"usage"`
+		Role  Role   `json:"role"`
+		Usage Usage  `json:"usage"`
 	} `json:"message"`
 }
 
@@ -183,8 +184,8 @@ func (e MessageStartEvent) EventType() string { return "message_start" }
 
 // MessageDeltaEvent contains a delta for the message
 type MessageDeltaEvent struct {
-	Type   string `json:"type"` // "message_delta"
-	Delta  struct {
+	Type  string `json:"type"` // "message_delta"
+	Delta struct {
 		StopReason string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage Usage `json:"usage"`
@@ -229,35 +230,35 @@ type ModelInfo struct {
 	ID          ModelID `json:"id"`
 	Name        string  `json:"name"`
 	Description string  `json:"description,omitempty"`
-	
+
 	// Capabilities
-	MaxTokens        int     `json:"max_tokens,omitempty"`
-	MaxInputTokens   int     `json:"max_input_tokens,omitempty"`
-	MaxOutputTokens  int     `json:"max_output_tokens,omitempty"`
-	SupportsVision   bool    `json:"supports_vision,omitempty"`
-	SupportsTools    bool    `json:"supports_tools,omitempty"`
-	SupportsStreaming bool   `json:"supports_streaming,omitempty"`
-	
+	MaxTokens         int  `json:"max_tokens,omitempty"`
+	MaxInputTokens    int  `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens   int  `json:"max_output_tokens,omitempty"`
+	SupportsVision    bool `json:"supports_vision,omitempty"`
+	SupportsTools     bool `json:"supports_tools,omitempty"`
+	SupportsStreaming bool `json:"supports_streaming,omitempty"`
+
 	// Cost per 1M tokens
 	Cost Cost `json:"cost"`
-	
+
 	// Provider-specific metadata
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ProviderInfo represents information about a provider
 type ProviderInfo struct {
-	ID          ProviderID          `json:"id"`
-	Name        string              `json:"name"`
-	Description string              `json:"description,omitempty"`
-	BaseURL     string              `json:"base_url"`
-	
+	ID          ProviderID `json:"id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description,omitempty"`
+	BaseURL     string     `json:"base_url"`
+
 	// Environment variables for API keys
 	EnvKeys []string `json:"env"`
-	
+
 	// Models available from this provider
 	Models map[ModelID]ModelInfo `json:"models"`
-	
+
 	// Provider-specific options
 	Options map[string]interface{} `json:"options,omitempty"`
 }

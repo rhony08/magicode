@@ -10,29 +10,29 @@ import (
 type Provider interface {
 	// ID returns the provider's unique identifier
 	ID() ProviderID
-	
+
 	// Info returns provider information
 	Info() ProviderInfo
-	
+
 	// Chat sends a non-streaming chat request
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
-	
+
 	// StreamChat sends a streaming chat request and returns a channel of events
 	StreamChat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
-	
+
 	// StreamChatRaw sends a streaming request and returns the raw response body
 	// for custom parsing
 	StreamChatRaw(ctx context.Context, req ChatRequest) (io.ReadCloser, error)
-	
+
 	// ValidateKey checks if the API key is valid
 	ValidateKey(ctx context.Context) error
-	
+
 	// SetAPIKey sets the API key for this provider
 	SetAPIKey(key string)
-	
+
 	// SetBaseURL sets a custom base URL (for proxies)
 	SetBaseURL(url string)
-	
+
 	// Close cleans up resources (connection pools, etc.)
 	Close() error
 }
@@ -60,10 +60,33 @@ func NewProviderRegistry() *ProviderRegistry {
 // Register adds a provider to the registry
 func (r *ProviderRegistry) Register(p Provider) {
 	r.providers[p.ID()] = p
-	
+
 	// Register all models from this provider
 	for modelID, modelInfo := range p.Info().Models {
 		r.models[modelID] = modelInfo
+	}
+}
+
+// AddModels adds models to an existing provider
+// This is used when loading additional models from OpenCode config
+func (r *ProviderRegistry) AddModels(providerID ProviderID, models map[ModelID]ModelInfo) {
+	for modelID, modelInfo := range models {
+		r.models[modelID] = modelInfo
+	}
+
+	// Also update the provider's internal models if it's OpenAI-compatible
+	prov, ok := r.providers[providerID]
+	if ok {
+		switch p := prov.(type) {
+		case *OpenAICompatibleProvider:
+			for modelID, modelInfo := range models {
+				p.OpenAIProvider.models[modelID] = modelInfo
+			}
+		case *OpenAIProvider:
+			for modelID, modelInfo := range models {
+				p.models[modelID] = modelInfo
+			}
+		}
 	}
 }
 
