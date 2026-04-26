@@ -127,6 +127,8 @@ go test ./internal/provider/... -v -run TestOpenAIStream
 
 **Goal:** Add providers from OpenCode config that use OpenAI-compatible API
 
+#### 1.1 Bundled OpenAI-Compatible Providers
+
 **Easy wins:** These providers use OpenAI-compatible endpoints, so we can reuse `openai.go`:
 
 | Provider | Base URL | Environment Key |
@@ -140,41 +142,97 @@ go test ./internal/provider/... -v -run TestOpenAIStream
 | cerebras | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEY` |
 | deepinfra | `https://api.deepinfra.com/v1/openai` | `DEEPINFRA_API_KEY` |
 
-**Implementation:** Create `openai_compatible.go` with configurable base URL
+#### 1.2 Custom Providers from OpenCode Config
+
+**OpenCode allows users to define custom providers in `opencode.json`:**
+
+```json
+{
+  "provider": {
+    "my-custom-provider": {
+      "name": "My Custom API",
+      "baseURL": "https://my-api.example.com/v1",
+      "apiKey": "xxx",
+      "models": {
+        "custom-model": {
+          "id": "custom-model",
+          "name": "Custom Model",
+          "limit": { "context": 128000, "output": 4096 }
+        }
+      }
+    }
+  }
+}
+```
+
+**Implementation:** Dynamic provider registration from config
 
 ```go
-// File: internal/provider/openai_compatible.go
+// File: internal/provider/dynamic.go
 
-// OpenAICompatibleProvider is a generic OpenAI-compatible provider
-type OpenAICompatibleProvider struct {
-    *OpenAIProvider  // Embed OpenAI provider
+// DynamicProvider creates a provider from OpenCode config
+type DynamicProvider struct {
+    *OpenAIProvider
     providerID ProviderID
-    envKey     string
+    name       string
+    models     map[ModelID]ModelInfo
 }
 
-// NewOpenRouterProvider creates OpenRouter provider
-func NewOpenRouterProvider(apiKey string) *OpenAICompatibleProvider {
+// RegisterFromConfig reads OpenCode config and registers all providers
+func RegisterFromConfig(registry *ProviderRegistry, configReader *opencode.ConfigReader) error {
+    providers, err := configReader.ReadProviders()
+    if err != nil {
+        return err
+    }
+    
+    for _, p := range providers {
+        // Skip bundled providers (already registered)
+        if isBundledProvider(p.ID) {
+            // Just add models to existing provider
+            registry.AddModels(ProviderID(p.ID), convertModels(p.Models))
+            continue
+        }
+        
+        // Create dynamic provider for custom providers
+        dp := NewDynamicProvider(p.ID, p.Name, p.BaseURL, p.APIKey, p.Models)
+        registry.Register(dp)
+    }
+    
+    return nil
+}
+
+func NewDynamicProvider(id, name, baseURL, apiKey string, models map[string]opencode.Model) *DynamicProvider {
     p := NewOpenAIProvider(apiKey)
-    p.SetBaseURL("https://openrouter.ai/api/v1")
-    return &OpenAICompatibleProvider{
+    if baseURL != "" {
+        p.SetBaseURL(baseURL)
+    }
+    
+    // Convert models
+    modelInfo := convertModels(models)
+    
+    return &DynamicProvider{
         OpenAIProvider: p,
-        providerID: ProviderOpenRouter,
-        envKey: "OPENROUTER_API_KEY",
+        providerID:     ProviderID(id),
+        name:           name,
+        models:         modelInfo,
     }
 }
-
-// Similarly for: Groq, Mistral, TogetherAI, Perplexity, XAI, Cerebras, DeepInfra
 ```
 
 **Tasks:**
-- [ ] Create `openai_compatible.go` base
-- [ ] Add OpenRouter provider
-- [ ] Add Groq provider
-- [ ] Add Mistral provider
-- [ ] Add TogetherAI provider
-- [ ] Add Perplexity provider
-- [ ] Add XAI (Grok) provider
+- [ ] Create `openai_compatible.go` base for bundled providers
+- [ ] Create `dynamic.go` for custom providers from config
+- [ ] Add OpenRouter provider (bundled)
+- [ ] Add Groq provider (bundled)
+- [ ] Add Mistral provider (bundled)
+- [ ] Add TogetherAI provider (bundled)
+- [ ] Add Perplexity provider (bundled)
+- [ ] Add XAI (Grok) provider (bundled)
+- [ ] Add Cerebras provider (bundled)
+- [ ] Add DeepInfra provider (bundled)
+- [ ] Implement `RegisterFromConfig()` for dynamic registration
 - [ ] Read models from OpenCode config for each provider
+- [ ] Test with custom provider defined in config
 
 ---
 
@@ -634,6 +692,8 @@ cd magicode && go run ./cmd/magicode
 ### New Files (Need to Create)
 | File | Purpose | Phase |
 |------|---------|-------|
+| `internal/provider/openai_compatible.go` | Bundled OpenAI-compatible providers | 1 |
+| `internal/provider/dynamic.go` | Custom providers from OpenCode config | 1 |
 | `internal/session/processor.go` | Message processing core | 2 |
 | `internal/session/converter.go` | Message format conversion | 2 |
 | `internal/tool/runner.go` | Tool execution | 3 |
@@ -644,7 +704,6 @@ cd magicode && go run ./cmd/magicode
 | `internal/tool/edit.go` | Edit tool implementation | 3 |
 | `internal/tool/glob.go` | Glob tool implementation | 3 |
 | `internal/tool/grep.go` | Grep tool implementation | 3 |
-| `internal/provider/openai_compatible.go` | OpenAI-compatible base | 1 |
 
 ### Modified Files (Need Updates)
 | File | Changes | Phase |
@@ -653,6 +712,7 @@ cd magicode && go run ./cmd/magicode
 | `internal/server/routes.go` | Add prompt_async, SSE endpoints | 5 |
 | `internal/bus/bus.go` | Add stream event types | 2 |
 | `internal/provider/types.go` | May need minor additions | 0 |
+| `internal/opencode/config.go` | Add provider registry integration | 1 |
 
 ---
 
