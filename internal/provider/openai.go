@@ -28,13 +28,13 @@ const OpenAIDefaultBaseURL = "https://api.openai.com/v1"
 // OpenAIModels are the well-known OpenAI models
 var OpenAIModels = map[ModelID]ModelInfo{
 	FormatModelID(ProviderOpenAI, "gpt-4o"): {
-		ID:               FormatModelID(ProviderOpenAI, "gpt-4o"),
-		Name:             "GPT-4o",
-		Description:      "Most advanced multimodal model",
-		MaxInputTokens:   128000,
-		MaxOutputTokens:  4096,
-		SupportsVision:   true,
-		SupportsTools:    true,
+		ID:                FormatModelID(ProviderOpenAI, "gpt-4o"),
+		Name:              "GPT-4o",
+		Description:       "Most advanced multimodal model",
+		MaxInputTokens:    128000,
+		MaxOutputTokens:   4096,
+		SupportsVision:    true,
+		SupportsTools:     true,
 		SupportsStreaming: true,
 		Cost: Cost{
 			Input:  5.00,
@@ -42,13 +42,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "gpt-4o-mini"): {
-		ID:               FormatModelID(ProviderOpenAI, "gpt-4o-mini"),
-		Name:             "GPT-4o Mini",
-		Description:      "Affordable and intelligent small model",
-		MaxInputTokens:   128000,
-		MaxOutputTokens:  16384,
-		SupportsVision:   true,
-		SupportsTools:    true,
+		ID:                FormatModelID(ProviderOpenAI, "gpt-4o-mini"),
+		Name:              "GPT-4o Mini",
+		Description:       "Affordable and intelligent small model",
+		MaxInputTokens:    128000,
+		MaxOutputTokens:   16384,
+		SupportsVision:    true,
+		SupportsTools:     true,
 		SupportsStreaming: true,
 		Cost: Cost{
 			Input:  0.15,
@@ -56,13 +56,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "gpt-4-turbo"): {
-		ID:               FormatModelID(ProviderOpenAI, "gpt-4-turbo"),
-		Name:             "GPT-4 Turbo",
-		Description:      "Previous generation flagship model",
-		MaxInputTokens:   128000,
-		MaxOutputTokens:  4096,
-		SupportsVision:   true,
-		SupportsTools:    true,
+		ID:                FormatModelID(ProviderOpenAI, "gpt-4-turbo"),
+		Name:              "GPT-4 Turbo",
+		Description:       "Previous generation flagship model",
+		MaxInputTokens:    128000,
+		MaxOutputTokens:   4096,
+		SupportsVision:    true,
+		SupportsTools:     true,
 		SupportsStreaming: true,
 		Cost: Cost{
 			Input:  10.00,
@@ -70,13 +70,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "gpt-4"): {
-		ID:               FormatModelID(ProviderOpenAI, "gpt-4"),
-		Name:             "GPT-4",
-		Description:      "Previous generation flagship model",
-		MaxInputTokens:   8192,
-		MaxOutputTokens:  4096,
-		SupportsVision:   false,
-		SupportsTools:    true,
+		ID:                FormatModelID(ProviderOpenAI, "gpt-4"),
+		Name:              "GPT-4",
+		Description:       "Previous generation flagship model",
+		MaxInputTokens:    8192,
+		MaxOutputTokens:   4096,
+		SupportsVision:    false,
+		SupportsTools:     true,
 		SupportsStreaming: true,
 		Cost: Cost{
 			Input:  30.00,
@@ -84,13 +84,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "gpt-3.5-turbo"): {
-		ID:               FormatModelID(ProviderOpenAI, "gpt-3.5-turbo"),
-		Name:             "GPT-3.5 Turbo",
-		Description:      "Fast, affordable model",
-		MaxInputTokens:   16385,
-		MaxOutputTokens:  4096,
-		SupportsVision:   false,
-		SupportsTools:    true,
+		ID:                FormatModelID(ProviderOpenAI, "gpt-3.5-turbo"),
+		Name:              "GPT-3.5 Turbo",
+		Description:       "Fast, affordable model",
+		MaxInputTokens:    16385,
+		MaxOutputTokens:   4096,
+		SupportsVision:    false,
+		SupportsTools:     true,
 		SupportsStreaming: true,
 		Cost: Cost{
 			Input:  0.50,
@@ -98,13 +98,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "o1-preview"): {
-		ID:               FormatModelID(ProviderOpenAI, "o1-preview"),
-		Name:             "o1 Preview",
-		Description:      "Reasoning model for complex problems",
-		MaxInputTokens:   128000,
-		MaxOutputTokens:  32768,
-		SupportsVision:   true,
-		SupportsTools:    false,
+		ID:                FormatModelID(ProviderOpenAI, "o1-preview"),
+		Name:              "o1 Preview",
+		Description:       "Reasoning model for complex problems",
+		MaxInputTokens:    128000,
+		MaxOutputTokens:   32768,
+		SupportsVision:    true,
+		SupportsTools:     false,
 		SupportsStreaming: false,
 		Cost: Cost{
 			Input:  15.00,
@@ -112,13 +112,13 @@ var OpenAIModels = map[ModelID]ModelInfo{
 		},
 	},
 	FormatModelID(ProviderOpenAI, "o1-mini"): {
-		ID:               FormatModelID(ProviderOpenAI, "o1-mini"),
-		Name:             "o1 Mini",
-		Description:      "Fast reasoning model",
-		MaxInputTokens:   128000,
-		MaxOutputTokens:  65536,
-		SupportsVision:   true,
-		SupportsTools:    false,
+		ID:                FormatModelID(ProviderOpenAI, "o1-mini"),
+		Name:              "o1 Mini",
+		Description:       "Fast reasoning model",
+		MaxInputTokens:    128000,
+		MaxOutputTokens:   65536,
+		SupportsVision:    true,
+		SupportsTools:     false,
 		SupportsStreaming: false,
 		Cost: Cost{
 			Input:  3.00,
@@ -183,14 +183,14 @@ func (p *OpenAIProvider) ValidateKey(ctx context.Context) error {
 	if p.apiKey == "" {
 		return fmt.Errorf("openai API key is not set")
 	}
-	
+
 	// Make a minimal request to validate the key
 	req := ChatRequest{
 		Model:     FormatModelID(ProviderOpenAI, "gpt-3.5-turbo"),
 		MaxTokens: 1,
 		Messages:  []Message{{Role: RoleUser, Content: "Hi"}},
 	}
-	
+
 	_, err := p.Chat(ctx, req)
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid api_key") || strings.Contains(err.Error(), "Incorrect API key") {
@@ -206,13 +206,13 @@ func (p *OpenAIProvider) ValidateKey(ctx context.Context) error {
 
 // openaiRequest is the OpenAI API request format
 type openaiRequest struct {
-	Model       string           `json:"model"`
-	Messages    []openaiMessage  `json:"messages"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
-	Tools       []openaiTool     `json:"tools,omitempty"`
-	Stop        []string         `json:"stop,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []openaiMessage `json:"messages"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature float64         `json:"temperature,omitempty"`
+	Tools       []openaiTool    `json:"tools,omitempty"`
+	Stop        []string        `json:"stop,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
 }
 
 type openaiMessage struct {
@@ -221,8 +221,8 @@ type openaiMessage struct {
 }
 
 type openaiTool struct {
-	Type     string                 `json:"type"`
-	Function openaiToolFunction     `json:"function"`
+	Type     string             `json:"type"`
+	Function openaiToolFunction `json:"function"`
 }
 
 type openaiToolFunction struct {
@@ -327,9 +327,9 @@ type openaiChoice struct {
 }
 
 type openaiChoiceMsg struct {
-	Role      string              `json:"role"`
-	Content   string              `json:"content"`
-	ToolCalls []openaiToolCall    `json:"tool_calls,omitempty"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 }
 
 type openaiToolCall struct {
@@ -511,20 +511,22 @@ func (p *OpenAIProvider) parseStreamResponse(body io.ReadCloser, events chan Str
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var accumulatedContent = make(map[int]string)
+	// Track tool calls separately - map[index] -> id
+	var toolCallStarted = make(map[int]bool)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		if line == "" {
 			continue
 		}
-		
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		
+
 		data := strings.TrimPrefix(line, "data: ")
-		
+
 		// Check for stream end
 		if data == "[DONE]" {
 			// Send final content block stop
@@ -548,12 +550,12 @@ func (p *OpenAIProvider) parseStreamResponse(body io.ReadCloser, events chan Str
 				if accumulatedContent[choice.Index] == "" {
 					// First content for this index - send start event
 					events <- ContentBlockStartEvent{
-						Type:        "content_block_start",
+						Type:         "content_block_start",
 						Index:        choice.Index,
 						ContentBlock: TextPart{Type: "text"},
 					}
 				}
-				
+
 				events <- ContentBlockDeltaEvent{
 					Type:  "content_block_delta",
 					Index: choice.Index,
@@ -564,13 +566,15 @@ func (p *OpenAIProvider) parseStreamResponse(body io.ReadCloser, events chan Str
 
 			// Handle tool call deltas
 			for _, tc := range choice.Delta.ToolCalls {
-				if accumulatedContent[choice.Index] == "" {
-					// First content - send start event
+				// Check if this tool call index has already sent a start event
+				if !toolCallStarted[choice.Index] {
+					// First tool call for this index - send start event
 					events <- ContentBlockStartEvent{
-						Type:        "content_block_start",
+						Type:         "content_block_start",
 						Index:        choice.Index,
 						ContentBlock: ToolUsePart{Type: "tool_use", ID: tc.ID, Name: tc.Function.Name},
 					}
+					toolCallStarted[choice.Index] = true
 				}
 
 				// Parse arguments delta
@@ -616,10 +620,10 @@ func (p *OpenAIProvider) parseStreamResponse(body io.ReadCloser, events chan Str
 }
 
 type openaiStreamChunk struct {
-	ID      string            `json:"id"`
-	Object  string            `json:"object"`
-	Created int64             `json:"created"`
-	Model   string            `json:"model"`
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created"`
+	Model   string               `json:"model"`
 	Choices []openaiStreamChoice `json:"choices"`
 }
 
@@ -630,14 +634,14 @@ type openaiStreamChoice struct {
 }
 
 type openaiStreamDelta struct {
-	Role      string               `json:"role,omitempty"`
-	Content   string               `json:"content,omitempty"`
+	Role      string                 `json:"role,omitempty"`
+	Content   string                 `json:"content,omitempty"`
 	ToolCalls []openaiStreamToolCall `json:"tool_calls,omitempty"`
 }
 
 type openaiStreamToolCall struct {
-	ID       string                     `json:"id,omitempty"`
-	Type     string                     `json:"type,omitempty"`
+	ID       string                       `json:"id,omitempty"`
+	Type     string                       `json:"type,omitempty"`
 	Function openaiStreamToolCallFunction `json:"function"`
 }
 
