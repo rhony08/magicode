@@ -18,6 +18,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/opencode"
+	"github.com/rhony08/magicode/internal/provider"
+	"github.com/rhony08/magicode/internal/session"
+	"github.com/rhony08/magicode/internal/tool"
 	"github.com/rhony08/magicode/internal/tui/component"
 	"github.com/rhony08/magicode/internal/tui/dialog"
 	"github.com/rhony08/magicode/internal/tui/layout"
@@ -41,6 +44,11 @@ type App struct {
 
 	// OpenCode configuration flag
 	useOpenCode bool
+
+	// AI processing
+	processor        *session.Processor
+	providerRegistry *provider.ProviderRegistry
+	toolRegistry     *tool.Registry
 
 	// UI components - layout package
 	sidebar       *layout.Sidebar
@@ -88,6 +96,11 @@ type Config struct {
 	MessageMeta     MessageMeta // Pagination metadata for initial load
 	DatabasePath    string      // Database path for loading more messages
 	UseOpenCode     bool        // Use OpenCode configuration for agents/providers
+
+	// AI processing components (optional, can be set later with SetProcessor)
+	Processor        *session.Processor
+	ProviderRegistry *provider.ProviderRegistry
+	ToolRegistry     *tool.Registry
 }
 
 // workingDirectory returns the working directory from config or current directory
@@ -170,6 +183,9 @@ func NewApp(cfg Config) *App {
 		databasePath:     cfg.DatabasePath,
 		workingDirectory: cfg.workingDirectory(),
 		useOpenCode:      cfg.UseOpenCode,
+		processor:        cfg.Processor,
+		providerRegistry: cfg.ProviderRegistry,
+		toolRegistry:     cfg.ToolRegistry,
 		sidebar:          sidebar,
 		mobileSidebar:    mobileSidebar,
 		footer:           footer,
@@ -187,6 +203,14 @@ func NewApp(cfg Config) *App {
 	}
 
 	return app
+}
+
+// SetProcessor sets the processor and related components after initialization
+// This is useful when the database is opened after the app is created
+func (a *App) SetProcessor(processor *session.Processor, providerRegistry *provider.ProviderRegistry, toolRegistry *tool.Registry) {
+	a.processor = processor
+	a.providerRegistry = providerRegistry
+	a.toolRegistry = toolRegistry
 }
 
 // Init initializes the app (tea.Model interface)
@@ -1900,12 +1924,66 @@ func (a *App) submitInput() (tea.Model, tea.Cmd) {
 	return a, a.sendMessage(content)
 }
 
-// sendMessage sends a message (placeholder for integration)
+// sendMessage sends a message using the AI processor
 func (a *App) sendMessage(content string) tea.Cmd {
 	return func() tea.Msg {
-		// Placeholder - would integrate with provider
+		// Check if processor is available
+		if a.processor == nil {
+			// Fallback to placeholder if processor not configured
+			return ResponseMsg{
+				Content: "AI processing not configured. Please initialize the processor.",
+			}
+		}
+
+		// Get current model from state
+		modelKey := a.state.Local.CurrentModel
+		if modelKey.ProviderID == "" {
+			// Default model
+			modelKey = types.ModelKey{
+				ProviderID: "anthropic",
+				ModelID:    "claude-sonnet-4-5",
+			}
+		}
+
+		// Build model ID string
+		fullModelID := provider.FormatModelID(provider.ProviderID(modelKey.ProviderID), modelKey.ModelID)
+
+		// Get system prompt from current agent
+		var systemPrompt string
+		if agent := a.state.GetCurrentAgent(); agent != nil {
+			systemPrompt = agent.Content
+		}
+
+		// Get tool definitions from processor
+		var tools []provider.ToolDefinition
+		if a.toolRegistry != nil {
+			tools = a.processor.GetToolDefinitions()
+		}
+
+		// Build process request
+		req := session.ProcessRequest{
+			SessionID:    a.state.SessionID,
+			UserMessage:  content,
+			Model:        fullModelID,
+			SystemPrompt: systemPrompt,
+			Tools:        tools,
+			Agent:        a.state.Local.CurrentAgent,
+		}
+
+		// Start processing asynchronously
+		ctx := context.Background()
+		err := a.processor.Process(ctx, req)
+		if err != nil {
+			return ResponseMsg{
+				Content: fmt.Sprintf("Error: %v", err),
+				Error:   err,
+			}
+		}
+
+		// Return empty response - actual content will come via bus events
+		// For now, we show a message indicating streaming is happening
 		return ResponseMsg{
-			Content: "This is a placeholder response. Integration needed.",
+			Content: "Processing... (streaming response)",
 		}
 	}
 }
