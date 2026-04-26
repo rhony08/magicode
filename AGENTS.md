@@ -229,3 +229,468 @@ Ctrl+X + q    Exit app
 - Use `log.Info`, `log.Warn`, `log.Error` for logging
 - Check LSP diagnostics in-editor after edits
 - Run `go test -v ./internal/tui` for verbose test output
+
+## OpenCode Configuration Integration (Phase 1 Complete)
+
+**Status**: ✅ All subtasks complete
+
+### Overview
+MagiCode can now read and use OpenCode's agent and provider configuration when the `--use-opencode` flag is used. This enables seamless migration from OpenCode while maintaining memory efficiency.
+
+### Implementation Details
+
+#### Phase 1.1: Config Reader (`internal/opencode/config.go`)
+
+**Files created:**
+- `internal/opencode/config.go` - Main config reader
+- `internal/opencode/config_test.go` - Comprehensive tests
+
+**Key types:**
+```go
+type Agent struct {
+    Name, Description, Mode, Color string
+    Temperature float64
+    Tools map[string]bool
+    Permission map[string]map[string]string
+    Content string  // Full prompt content
+    Hidden bool
+}
+
+type Provider struct {
+    ID, NPM, Name, BaseURL, APIKey string
+    Models map[string]Model
+}
+
+type Model struct {
+    ID, Name string
+    Modalities ModelModalities  // input/output types
+    Options ModelOptions        // thinking configuration
+    Limit ModelLimit           // context/output limits
+}
+
+type ConfigReader struct {
+    configDir string  // ~/.config/opencode
+    stateDir  string  // ~/.local/share/opencode/state
+}
+```
+
+**Methods:**
+- `ReadAgents()` - Reads all agents from `~/.config/opencode/agents/*.md`
+- `ReadConfig()` - Reads provider config from `~/.config/opencode/opencode.json`
+- `ReadProviders()` - Returns providers as slice
+- `ReadModelState()` - Reads recent/favorite models from state
+- `GetFirstValidModel()` - Returns first available model
+- `ConfigExists()` - Checks if OpenCode config exists
+
+#### Phase 1.2: Type Extensions (`internal/tui/types/types.go`)
+
+**Extended Agent type:**
+```go
+type Agent struct {
+    Name, Description, Mode, Color string
+    Temperature float64
+    Tools map[string]bool
+    Permission map[string]interface{}  // For OpenCode permissions
+    Content string                     // Full prompt content
+    Hidden bool
+}
+```
+
+**Extended Provider type:**
+```go
+type Provider struct {
+    ID, Name string
+    Models map[string]Model
+    Connected bool
+    NPM, BaseURL, APIKey string  // OpenCode fields
+}
+```
+
+**New Model subtypes:**
+```go
+type ModelModalities struct { Input, Output []string }
+type ModelOptions struct { Thinking *ModelThinkingOptions }
+type ModelThinkingOptions struct { Type string; BudgetTokens int }
+type ModelLimit struct { Context, Output int }
+```
+
+**Added methods to AppState:**
+- `CycleAgent(direction int)` - Cycles through agents with wrapping
+- `CycleModel(direction int)` - Cycles through available models
+- `IsModelValid(modelKey) bool` - Checks if model exists in providers
+- `GetAgent(name) *Agent` - Gets agent by name
+- `GetCurrentAgent() *Agent` - Gets current agent (with fallback)
+- `GetAgentColor(name) string` - Returns agent color or default
+
+#### Phase 1.3: Memory-Efficient Config Sync (`internal/tui/app.go`)
+
+**Problem solved:** Loading entire OpenCode config (~500KB-2MB) is wasteful
+
+**Solution:** Minimal initial load with lazy-loading
+
+**Memory-efficient sync flow:**
+```
+Startup
+  ↓
+Check session type
+  ↓
+Existing Session? → Load ONLY model used in last assistant message
+                    Load agent names only (no full content)
+                    Load single provider for that model
+  ↓
+New Session?      → Load recent model from state.json
+                    Load agent names only
+                    Load single provider for default model
+```
+
+**Key methods:**
+```go
+// Main entry point - chooses appropriate sync strategy
+func (a *App) syncOpenCodeConfig()
+
+// For existing sessions - preserves context
+func (a *App) syncExistingSessionModel(configReader)
+
+// For new sessions - uses defaults
+func (a *App) syncNewSessionDefaults(configReader)
+
+// Minimal metadata only (no full prompts)
+func (a *App) loadMinimalAgents(configReader) []Agent
+
+// Single provider for specific model
+func (a *App) loadMinimalProviderForModel(configReader, modelKey)
+```
+
+**Memory comparison:**
+- Before: ~500KB-2MB (all agents + all providers + all models)
+- After: ~5-10KB (current model + agent names only)
+
+#### Phase 1.4: Safe Model/Agent Switching (`internal/tui/app.go`)
+
+**Problem solved:** Subagents may require different models, cycling needs to handle missing models
+
+**Solution:** Lazy-loading with validation
+
+**Key safety methods:**
+```go
+// Validates model is loaded, loads if needed
+func (a *App) EnsureModelLoaded(modelKey ModelKey) bool
+
+// Switches agent AND ensures its preferred model
+func (a *App) SwitchAgent(agentName string) error
+
+// Cycles agents with automatic model loading
+func (a *App) SafeCycleAgent(direction int)
+
+// Cycles models with lazy-loading from config
+func (a *App) SafeCycleModel(direction int)
+
+// Validates current model, falls back if invalid
+func (a *App) ValidateCurrentModel() bool
+```
+
+**Usage examples:**
+```go
+// Safe agent switching (for subagents)
+if err := a.SwitchAgent("code-review"); err != nil {
+    log.Warn("Subagent switch failed", "error", err)
+}
+
+// Safe model cycling
+a.SafeCycleModel(+1) // Next model
+a.SafeCycleModel(-1) // Previous model
+
+// Validation before operations
+if !a.ValidateCurrentModel() {
+    a.state.SetStatus("No valid model available")
+    return
+}
+```
+
+**Lazy-loading flow:**
+```
+User switches agent/subagent invoked
+  ↓
+SwitchAgent("agent-name")
+  ↓
+Sets current agent
+  ↓
+Agent has preferred model?
+  ↓ YES
+EnsureModelLoaded(agent.Model)
+  ↓
+Check if model in memory
+  ↓ NO
+Read from OpenCode config
+  ↓
+Load provider + model
+  ↓
+Add to Local.Providers
+  ↓
+Switch to new model
+```
+
+### Configuration
+
+**Enable OpenCode integration:**
+```go
+app := tui.NewApp(tui.Config{
+    UseOpenCode: true,  // Enable config sync
+    // ... other config
+})
+```
+
+**CLI flag (when implemented):**
+```bash
+magicode --use-opencode
+```
+
+### File Locations
+
+**OpenCode config files read:**
+- Agents: `~/.config/opencode/agents/*.md`
+- Providers: `~/.config/opencode/opencode.json`
+- State: `~/.local/share/opencode/state/model.json`
+
+### Testing
+
+**Run tests:**
+```bash
+go test ./internal/opencode/... -v
+go test ./internal/tui/... -short
+```
+
+**All tests pass:**
+- Config reader tests (11 tests)
+- TUI tests (all packages)
+- Build successful
+
+---
+
+## Footer Redesign (Phase 2 Complete)
+
+**Status**: ✅ All subtasks complete
+
+### Overview
+Footer now displays current agent and model with color-coded agent indicator, matching OpenCode's design.
+
+### Implementation
+
+#### Phase 2.1: Footer Component (`internal/tui/layout/footer.go`)
+
+**Added fields:**
+```go
+type Footer struct {
+    // ... existing fields ...
+    agentName  string
+    agentColor string
+    modelName  string
+    modelID    string
+}
+```
+
+**Added config options:**
+```go
+type FooterConfig struct {
+    ShowDirectory bool
+    ShowAgent     bool  // NEW
+    ShowModel     bool  // NEW
+    ShowLSPMCP    bool
+    ShowHint      bool
+}
+```
+
+**Added methods:**
+```go
+func (f *Footer) SetAgent(name string, color string)
+func (f *Footer) SetModel(name string, id string)
+func (f *Footer) GetAgent() string
+func (f *Footer) GetModel() string
+```
+
+**Responsive Layout:**
+- **Narrow (< 60 cols)**: Directory only
+- **Medium (60-79 cols)**: Directory + Agent/Model
+- **Wide (>= 80 cols)**: Directory + Agent/Model + LSP/MCP + Status hint
+
+#### Phase 2.2: App Integration (`internal/tui/app.go`)
+
+**Added helper methods:**
+```go
+func (a *App) updateFooterModel(modelKey ModelKey)
+func (a *App) updateFooterAgent()
+```
+
+**Updated methods:**
+- `SwitchAgent()` - Updates footer with new agent/model
+- `SafeCycleModel()` - Updates footer after cycling
+- `syncExistingSessionModel()` - Initializes footer
+- `syncNewSessionDefaults()` - Initializes footer with defaults
+- `Init()` - Initializes footer on startup
+
+#### Phase 2.3: Footer Display Format
+
+**Wide (>= 80 cols):**
+```
+┌────────────────────────────────────────────────────────────────┐
+│ ~/projects/myapp    🤖 CodeReview    ⚡ Claude 3.5 Sonnet   3 LSP · 2 MCP │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Medium (60-79 cols):**
+```
+┌─────────────────────────────────────────┐
+│ ~/projects/myapp    🤖 CodeReview    ⚡ Claude 3.5...  │
+└─────────────────────────────────────────┘
+```
+
+**Narrow (< 60 cols):**
+```
+┌─────────────────────────┐
+│ ~/projects/myapp        │
+└─────────────────────────┘
+```
+
+**Features:**
+- Color-coded agent name (uses agent.Color hex value)
+- Emoji indicators (🤖 for agent, ⚡ for model)
+- Smart truncation for long names
+- Responsive layout based on terminal width
+
+### Next Steps (Phase 3)
+
+**Phase 3: Text Wrapping**
+- Implement text wrapping for message display
+- Handle wide characters and terminal resizing
+- Preserve markdown formatting while wrapping
+
+---
+
+## Text Wrapping (Phase 3 Complete)
+
+**Status**: ✅ All subtasks complete
+
+### Overview
+Message display now properly wraps text at word boundaries, respecting viewport width and handling wide characters correctly.
+
+### Implementation
+
+#### Phase 3.1: Text Wrapper Utility (`internal/tui/util/wrap.go`)
+
+**Functions:**
+```go
+// Wrap wraps text at specified width, preserving word boundaries
+func Wrap(text string, width int) []string
+
+// WrapPreserveNewlines wraps text but preserves explicit newlines
+func WrapPreserveNewlines(text string, width int) []string
+
+// WrapPreserveIndent wraps text while preserving leading indentation
+func WrapPreserveIndent(text string, width int) []string
+
+// StringWidth returns display width (handles CJK, emoji, ANSI codes)
+func StringWidth(s string) int
+
+// Truncate truncates text with ellipsis
+func Truncate(text string, width int, ellipsis string) string
+
+// StripANSI removes ANSI escape codes
+func StripANSI(s string) string
+```
+
+**Features:**
+- Word boundary preservation (doesn't split words mid-word)
+- Wide character support (CJK characters have width 2)
+- ANSI escape code handling (colors don't count toward width)
+- Empty line preservation
+- Long word breaking (words longer than width are broken)
+- Indentation preservation for code blocks
+
+**Comprehensive Tests:** 10 test cases covering:
+- Basic wrapping, long words, empty text
+- Newline preservation, indentation preservation
+- ANSI handling, truncation, string width calculation
+
+#### Phase 3.2: Message Rendering Updates (`internal/tui/app.go`)
+
+**Updated `buildMessagesContent()`:**
+- Calculates available width for text (viewport width - 8 for padding)
+- Wraps user messages with continuation line alignment
+- Wraps assistant messages with prefix handling
+- Wraps system messages
+- Maintains proper indentation for multi-line messages
+
+**Example wrapping:**
+```
+Before:
+[14:32] You: This is a very long message that would overflow the viewport and look bad
+
+After:
+[14:32] You: This is a very long message that would
+          overflow the viewport and look bad
+```
+
+**Updated `renderParts()`:**
+- Added `width` parameter
+- Wraps text parts with `WrapPreserveNewlines()`
+- Wraps thinking parts with emoji prefix
+- Tool results already handled by component renderer
+
+#### Phase 3.3: Responsive Width Calculation
+
+**Width calculation:**
+```go
+availableWidth := a.state.Layout.Width - 8  // Subtract padding
+if availableWidth < 40 {
+    availableWidth = 40  // Minimum width
+}
+```
+
+**Content width per message type:**
+- User messages: `availableWidth - prefixWidth`
+- Assistant messages: `availableWidth - prefixWidth`
+- System messages: `availableWidth`
+- Text parts: `availableWidth` (after header)
+
+#### Phase 3.4: Continuation Line Handling
+
+**Proper alignment:**
+```go
+prefix := fmt.Sprintf("[%s] You: ", timeStr)
+prefixWidth := util.StringWidth(prefix)
+
+wrappedContent := util.WrapPreserveNewlines(msg.Content, contentWidth)
+for i, line := range wrappedContent {
+    if i == 0 {
+        lines = append(lines, prefix+line)
+    } else {
+        // Align continuation lines with content
+        padding := strings.Repeat(" ", prefixWidth)
+        lines = append(lines, padding+line)
+    }
+}
+```
+
+### Usage Example
+
+```go
+// In message rendering:
+contentWidth := availableWidth - prefixWidth
+wrappedLines := util.WrapPreserveNewlines(msg.Content, contentWidth)
+
+// For code blocks with indentation:
+wrappedCode := util.WrapPreserveIndent(codeBlock, contentWidth)
+
+// For truncation:
+shortText := util.Truncate(longText, 50, "...")
+
+// For calculating display width:
+width := util.StringWidth(textWithEmojiAndColors)
+```
+
+### Responsive to Terminal Resize
+
+Text wrapping automatically adjusts when terminal is resized:
+- WindowSizeMsg triggers layout update
+- `buildMessagesContent()` recalculates width
+- Content re-wraps on next render

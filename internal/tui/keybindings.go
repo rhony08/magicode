@@ -52,6 +52,10 @@ type Keybindings struct {
 	Down           Keybinding
 	PageUp         Keybinding
 	PageDown       Keybinding
+	HalfPageUp     Keybinding // Ctrl+Alt+U
+	HalfPageDown   Keybinding // Ctrl+Alt+D
+	FirstMessage   Keybinding // Home or Ctrl+G
+	LastMessage    Keybinding // End or Ctrl+Alt+G
 	HistoryUp      Keybinding
 	HistoryDown    Keybinding
 	Select         Keybinding
@@ -103,6 +107,20 @@ func DefaultKeybindings() Keybindings {
 			Key: tea.KeyPgDown,
 			Str: "pgdown",
 		},
+		HalfPageUp: Keybinding{
+			Str: "ctrl+alt+u",
+		},
+		HalfPageDown: Keybinding{
+			Str: "ctrl+alt+d",
+		},
+		FirstMessage: Keybinding{
+			Key: tea.KeyHome,
+			Str: "home",
+		},
+		LastMessage: Keybinding{
+			Key: tea.KeyEnd,
+			Str: "end",
+		},
 		HistoryUp: Keybinding{
 			Str:  "ctrl+up",
 			Ctrl: true,
@@ -144,8 +162,12 @@ func KeyNames(kb Keybindings) map[string]string {
 		"newSession":     "Ctrl+N",
 		"up":             "↑",
 		"down":           "↓",
-		"pageUp":         "PgUp",
-		"pageDown":       "PgDn",
+		"pageUp":         "PgUp / Ctrl+Alt+B",
+		"pageDown":       "PgDn / Ctrl+Alt+F",
+		"halfPageUp":     "Ctrl+Alt+U",
+		"halfPageDown":   "Ctrl+Alt+D",
+		"firstMessage":   "Home / Ctrl+G",
+		"lastMessage":    "End / Ctrl+Alt+G",
 		"historyUp":      "Ctrl+↑",
 		"historyDown":    "Ctrl+↓",
 		"select":         "Enter",

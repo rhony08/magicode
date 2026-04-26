@@ -53,6 +53,9 @@ type Prompt struct {
 	agent   string
 	model   string
 	variant string
+
+	// Autocomplete
+	autocomplete *Autocomplete
 }
 
 // PromptStyles holds lipgloss styles for prompt
@@ -105,10 +108,11 @@ func NewPrompt(config PromptConfig, theme types.Theme) *Prompt {
 	}
 
 	prompt := &Prompt{
-		config:  config,
-		theme:   theme,
-		styles:  styles,
-		focused: true,
+		config:       config,
+		theme:        theme,
+		styles:       styles,
+		focused:      true,
+		autocomplete: NewAutocomplete(theme),
 	}
 
 	// Create textarea for multiline input
@@ -144,7 +148,36 @@ func (p *Prompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle key events
+		// Handle autocomplete first if visible
+		if p.autocomplete.IsVisible() {
+			switch msg.Type {
+			case tea.KeyTab:
+				// Select current option
+				if option, ok := p.autocomplete.Select(); ok {
+					p.InsertCompletion(option.Value)
+					p.autocomplete.Hide()
+				}
+				return p, nil
+			case tea.KeyDown:
+				p.autocomplete.Next()
+				return p, nil
+			case tea.KeyUp:
+				p.autocomplete.Previous()
+				return p, nil
+			case tea.KeyEsc:
+				p.autocomplete.Hide()
+				return p, nil
+			case tea.KeyEnter:
+				// Also select on Enter
+				if option, ok := p.autocomplete.Select(); ok {
+					p.InsertCompletion(option.Value)
+					p.autocomplete.Hide()
+				}
+				return p, nil
+			}
+		}
+
+		// Handle normal key events
 		switch msg.Type {
 		case tea.KeyEnter:
 			if !p.processing && p.GetValue() != "" {
@@ -153,6 +186,10 @@ func (p *Prompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			// Clear input
 			p.SetValue("")
+		case tea.KeyTab:
+			// Check if we should trigger autocomplete
+			p.checkAutocomplete()
+			return p, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -246,6 +283,14 @@ func (p *Prompt) Render() string {
 		sections = append(sections, p.styles.KeybindBar.Render(hints))
 	}
 
+	// ===========================================
+	// Section 4: Autocomplete dropdown
+	// ===========================================
+	if p.autocomplete.IsVisible() {
+		autocompleteView := p.autocomplete.Render(p.width)
+		sections = append(sections, autocompleteView)
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
@@ -311,6 +356,157 @@ func (p *Prompt) SetModelInfo(agent, model, variant string) {
 	p.agent = agent
 	p.model = model
 	p.variant = variant
+}
+
+// InsertCompletion inserts an autocomplete completion at cursor position
+func (p *Prompt) InsertCompletion(value string) {
+	currentValue := p.GetValue()
+	cursorPos := p.GetCursorPos()
+
+	// Find the word at cursor position
+	start, end := p.getWordBounds(currentValue, cursorPos)
+
+	// Replace the word with the completion
+	newValue := currentValue[:start] + value + currentValue[end:]
+	p.SetValue(newValue)
+
+	// Move cursor to end of inserted text
+	newCursorPos := start + len(value)
+	p.SetCursorPos(newCursorPos)
+}
+
+// checkAutocomplete checks if autocomplete should be triggered
+func (p *Prompt) checkAutocomplete() {
+	value := p.GetValue()
+	cursorPos := p.GetCursorPos()
+
+	// Get word at cursor
+	word := p.getWordAtCursor(value, cursorPos)
+
+	// Check for trigger characters
+	if strings.HasPrefix(word, "@") {
+		query := word[1:] // Remove @
+		p.ShowAgentCompletions(query)
+	} else if strings.HasPrefix(word, "/") && strings.Count(value[:cursorPos], "\n") == 0 {
+		// Only trigger / commands at start of line
+		query := word[1:] // Remove /
+		p.ShowCommandCompletions(query)
+	}
+}
+
+// getWordAtCursor extracts the word at cursor position
+func (p *Prompt) getWordAtCursor(text string, pos int) string {
+	if pos > len(text) {
+		pos = len(text)
+	}
+
+	// Find word boundaries
+	start := pos
+	for start > 0 && !isWordSeparator(text[start-1]) {
+		start--
+	}
+
+	end := pos
+	for end < len(text) && !isWordSeparator(text[end]) {
+		end++
+	}
+
+	return text[start:end]
+}
+
+// getWordBounds returns the start and end positions of the word at cursor
+func (p *Prompt) getWordBounds(text string, pos int) (int, int) {
+	if pos > len(text) {
+		pos = len(text)
+	}
+
+	start := pos
+	for start > 0 && !isWordSeparator(text[start-1]) {
+		start--
+	}
+
+	end := pos
+	for end < len(text) && !isWordSeparator(text[end]) {
+		end++
+	}
+
+	return start, end
+}
+
+// isWordSeparator checks if a character is a word separator
+func isWordSeparator(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// GetCursorPos returns the current cursor position
+func (p *Prompt) GetCursorPos() int {
+	if p.config.Multiline {
+		// textarea doesn't expose cursor position directly
+		// For now, return end of value
+		return len(p.textArea.Value())
+	}
+	// For textinput, we need to access the position differently
+	return len(p.textInput.Value())
+}
+
+// SetCursorPos sets the cursor position
+func (p *Prompt) SetCursorPos(pos int) {
+	// Both textarea and textinput don't support setting cursor position directly
+	// This is a limitation of the bubbles library
+}
+
+// ShowAgentCompletions shows agent/file completions
+func (p *Prompt) ShowAgentCompletions(query string) {
+	// This will be populated by the app with actual agents
+	// For now, just show a placeholder
+	options := []AutocompleteOption{
+		{Value: "@default", Display: "default", Description: "Default agent", Icon: "🤖"},
+		{Value: "@code", Display: "code", Description: "Code review agent", Icon: "💻"},
+	}
+	p.autocomplete.Show(options, "@", query)
+}
+
+// ShowCommandCompletions shows slash command completions
+func (p *Prompt) ShowCommandCompletions(query string) {
+	options := []AutocompleteOption{
+		{Value: "/status", Display: "status", Description: "Show system status", Icon: "📊"},
+		{Value: "/compact", Display: "compact", Description: "Compact session history", Icon: "🗜"},
+		{Value: "/export", Display: "export", Description: "Export session", Icon: "📤"},
+		{Value: "/help", Display: "help", Description: "Show help", Icon: "❓"},
+	}
+
+	// Filter by query
+	if query != "" {
+		var filtered []AutocompleteOption
+		for _, opt := range options {
+			if strings.HasPrefix(opt.Display, query) {
+				filtered = append(filtered, opt)
+			}
+		}
+		options = filtered
+	}
+
+	p.autocomplete.Show(options, "/", query)
+}
+
+// HideAutocomplete hides the autocomplete dropdown
+func (p *Prompt) HideAutocomplete() {
+	p.autocomplete.Hide()
+}
+
+// IsAutocompleteVisible returns true if autocomplete is visible
+func (p *Prompt) IsAutocompleteVisible() bool {
+	return p.autocomplete.IsVisible()
+}
+
+// GetAutocomplete returns the autocomplete component
+func (p *Prompt) GetAutocomplete() *Autocomplete {
+	return p.autocomplete
+}
+
+// SetAutocompleteOptions sets the autocomplete options for agents
+func (p *Prompt) SetAutocompleteOptions(options []AutocompleteOption) {
+	p.autocomplete.SetOptions(options)
 }
 
 // Width returns the prompt width

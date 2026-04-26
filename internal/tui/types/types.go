@@ -46,11 +46,19 @@ type Theme struct {
 	Border       lipgloss.Color `json:"border"`
 	BorderActive lipgloss.Color `json:"border_active"`
 
-	// Diff colors
+	// Diff colors (basic)
 	Added     lipgloss.Color `json:"added"`
 	Removed   lipgloss.Color `json:"removed"`
 	AddedBg   lipgloss.Color `json:"added_bg"`
 	RemovedBg lipgloss.Color `json:"removed_bg"`
+
+	// Diff colors (extended - OpenCode compatible)
+	DiffContextBg           lipgloss.Color `json:"diff_context_bg"`
+	DiffHighlightAdded      lipgloss.Color `json:"diff_highlight_added"`
+	DiffHighlightRemoved    lipgloss.Color `json:"diff_highlight_removed"`
+	DiffLineNumber          lipgloss.Color `json:"diff_line_number"`
+	DiffAddedLineNumberBg   lipgloss.Color `json:"diff_added_line_number_bg"`
+	DiffRemovedLineNumberBg lipgloss.Color `json:"diff_removed_line_number_bg"`
 
 	// Markdown colors
 	Heading    lipgloss.Color `json:"heading"`
@@ -358,9 +366,11 @@ const (
 )
 
 // Part represents a part of a message (for assistant responses)
+// Types: text, reasoning, file, tool_use, tool_result
+// OpenCode uses "reasoning" type for thinking blocks (not "thinking")
 type Part struct {
 	ID         string `json:"id"`
-	Type       string `json:"type"` // text, tool_use, tool_result
+	Type       string `json:"type"` // text, reasoning, file, tool_use, tool_result
 	Text       string `json:"text,omitempty"`
 	ToolID     string `json:"tool_id,omitempty"`
 	ToolName   string `json:"tool_name,omitempty"`
@@ -438,6 +448,9 @@ type LayoutStore struct {
 
 	// Handoff state for session transitions
 	Handoff *TabHandoff `json:"handoff,omitempty"`
+
+	// Auto-scroll state - tracks if user manually scrolled
+	UserScrolled bool `json:"user_scrolled"` // true if user scrolled away from bottom
 }
 
 // SidebarLayout holds sidebar layout state
@@ -697,6 +710,16 @@ func (d *DialogStore) HasOpen() bool {
 func (s *AppState) SetDimensions(width, height int) {
 	s.Layout.Width = width
 	s.Layout.Height = height
+}
+
+// SetUserScrolled sets whether the user has manually scrolled away from bottom
+func (s *AppState) SetUserScrolled(scrolled bool) {
+	s.Layout.UserScrolled = scrolled
+}
+
+// IsUserScrolled returns true if user has scrolled away from bottom
+func (s *AppState) IsUserScrolled() bool {
+	return s.Layout.UserScrolled
 }
 
 // ToggleSidebar toggles sidebar visibility

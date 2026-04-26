@@ -21,6 +21,8 @@ import (
 	"github.com/rhony08/magicode/internal/tui/component"
 	"github.com/rhony08/magicode/internal/tui/dialog"
 	"github.com/rhony08/magicode/internal/tui/layout"
+	"github.com/rhony08/magicode/internal/tui/types"
+	"github.com/rhony08/magicode/internal/tui/util"
 	"github.com/rhony08/magicode/internal/util/log"
 )
 
@@ -36,6 +38,9 @@ type App struct {
 
 	// Working directory for session creation
 	workingDirectory string
+
+	// OpenCode configuration flag
+	useOpenCode bool
 
 	// UI components - layout package
 	sidebar       *layout.Sidebar
@@ -82,6 +87,7 @@ type Config struct {
 	Directory       string      // Working directory
 	MessageMeta     MessageMeta // Pagination metadata for initial load
 	DatabasePath    string      // Database path for loading more messages
+	UseOpenCode     bool        // Use OpenCode configuration for agents/providers
 }
 
 // workingDirectory returns the working directory from config or current directory
@@ -109,6 +115,9 @@ func NewApp(cfg Config) *App {
 	if cfg.Session.ID != "" {
 		state.SetActiveSession(&cfg.Session)
 		state.Sync.Sessions = []Session{cfg.Session}
+	} else if cfg.SessionID != "" {
+		// If only SessionID is provided, set it
+		state.SessionID = cfg.SessionID
 	}
 	if len(cfg.InitialMessages) > 0 {
 		state.SetMessages(cfg.InitialMessages)
@@ -160,6 +169,7 @@ func NewApp(cfg Config) *App {
 		styles:           styles,
 		databasePath:     cfg.DatabasePath,
 		workingDirectory: cfg.workingDirectory(),
+		useOpenCode:      cfg.UseOpenCode,
 		sidebar:          sidebar,
 		mobileSidebar:    mobileSidebar,
 		footer:           footer,
@@ -192,6 +202,21 @@ func (a *App) Init() tea.Cmd {
 		}
 	}
 
+	// Sync OpenCode config if enabled
+	if a.useOpenCode {
+		a.syncOpenCodeConfig()
+	} else {
+		// Initialize footer with defaults when not using OpenCode
+		a.updateFooterAgent()
+		a.updateFooterModel(a.state.Local.CurrentModel)
+	}
+
+	// Set initial viewport content if there are messages
+	if len(a.state.Sync.Messages) > 0 {
+		a.messageViewport.SetContent(a.buildMessagesContent())
+		a.messageViewport.GotoBottom()
+	}
+
 	return tea.Batch(
 		a.spinner.Tick,
 		textinput.Blink,
@@ -199,7 +224,650 @@ func (a *App) Init() tea.Cmd {
 	)
 }
 
-// Update handles events (tea.Model interface)
+// syncOpenCodeConfig reads OpenCode configuration and syncs it to the app state
+// This is memory-efficient: only loads the current model for existing sessions,
+// or the default/recent model for new sessions. Full config is lazy-loaded when needed.
+func (a *App) syncOpenCodeConfig() {
+	// Create config reader with default paths
+	configReader := opencode.DefaultConfigReader()
+
+	// Check if OpenCode config exists
+	if !configReader.ConfigExists() {
+		log.Info("OpenCode config not found, skipping sync")
+		return
+	}
+
+	// Determine if this is an existing session (has messages) or new session
+	isExistingSession := len(a.state.Sync.Messages) > 0
+
+	if isExistingSession {
+		// For existing sessions: only load the model that was actually used
+		a.syncExistingSessionModel(configReader)
+	} else {
+		// For new sessions: load minimal defaults
+		a.syncNewSessionDefaults(configReader)
+	}
+
+	log.Info("OpenCode config sync completed",
+		"session_type", map[bool]string{true: "existing", false: "new"}[isExistingSession],
+		"current_model", a.state.Local.CurrentModel.ModelID,
+		"current_agent", a.state.Local.CurrentAgent)
+}
+
+// syncExistingSessionModel loads only the model used in an existing session
+func (a *App) syncExistingSessionModel(configReader *opencode.ConfigReader) {
+	// Find the model used in the last assistant message
+	var lastModelKey ModelKey
+	for i := len(a.state.Sync.Messages) - 1; i >= 0; i-- {
+		msg := a.state.Sync.Messages[i]
+		if msg.Role == RoleAssistant && msg.Model != "" && msg.Provider != "" {
+			lastModelKey = ModelKey{
+				ProviderID: msg.Provider,
+				ModelID:    msg.Model,
+			}
+			log.Info("Found model from existing session", "provider", msg.Provider, "model", msg.Model)
+			break
+		}
+	}
+
+	// If we found a model used in this session, use it
+	if lastModelKey.ModelID != "" {
+		a.state.SetCurrentModel(lastModelKey)
+	}
+
+	// Load minimal agent metadata for cycling (names only, no full content)
+	agents := a.loadMinimalAgents(configReader)
+	if len(agents) > 0 {
+		a.state.Local.Agents = agents
+
+		// Set default agent if none selected
+		if a.state.Local.CurrentAgent == "" {
+			for _, agent := range agents {
+				if !agent.Hidden {
+					a.state.SetCurrentAgent(agent.Name)
+					break
+				}
+			}
+		}
+	}
+
+	// Load minimal provider metadata for the current model only
+	a.loadMinimalProviderForModel(configReader, lastModelKey)
+
+	// Update footer with loaded agent and model
+	a.updateFooterAgent()
+	a.updateFooterModel(lastModelKey)
+}
+
+// syncNewSessionDefaults loads default model/agent for new sessions
+func (a *App) syncNewSessionDefaults(configReader *opencode.ConfigReader) {
+	// Read model state to get recent model
+	modelState, err := configReader.ReadModelState()
+	if err != nil {
+		log.Warn("Failed to read OpenCode model state", "error", err)
+	}
+
+	// Use recent model if available
+	if modelState != nil && len(modelState.Recent) > 0 {
+		recent := modelState.Recent[0]
+		a.state.SetCurrentModel(ModelKey{
+			ProviderID: recent.ProviderID,
+			ModelID:    recent.ModelID,
+		})
+		log.Info("Set model from OpenCode recent", "provider", recent.ProviderID, "model", recent.ModelID)
+	} else {
+		// Fall back to first valid model from config
+		modelRef, err := configReader.GetFirstValidModel()
+		if err == nil && modelRef != nil {
+			a.state.SetCurrentModel(ModelKey{
+				ProviderID: modelRef.ProviderID,
+				ModelID:    modelRef.ModelID,
+			})
+			log.Info("Set default model from OpenCode config", "provider", modelRef.ProviderID, "model", modelRef.ModelID)
+		}
+	}
+
+	// Load minimal agent metadata
+	agents := a.loadMinimalAgents(configReader)
+	if len(agents) > 0 {
+		a.state.Local.Agents = agents
+
+		// Set default agent
+		for _, agent := range agents {
+			if !agent.Hidden {
+				a.state.SetCurrentAgent(agent.Name)
+				break
+			}
+		}
+	}
+
+	// Load minimal provider metadata for current model
+	a.loadMinimalProviderForModel(configReader, a.state.Local.CurrentModel)
+
+	// Update footer with loaded agent and model
+	a.updateFooterAgent()
+	a.updateFooterModel(a.state.Local.CurrentModel)
+}
+
+// loadMinimalAgents loads only agent metadata (no full content/prompts)
+func (a *App) loadMinimalAgents(configReader *opencode.ConfigReader) []Agent {
+	opencodeAgents, err := configReader.ReadAgents()
+	if err != nil {
+		log.Warn("Failed to read OpenCode agents", "error", err)
+		return nil
+	}
+
+	var agents []Agent
+	for _, opencodeAgent := range opencodeAgents {
+		// Only store metadata, not the full content (saves memory)
+		agents = append(agents, Agent{
+			Name:        opencodeAgent.Name,
+			Description: opencodeAgent.Description,
+			Mode:        opencodeAgent.Mode,
+			Color:       opencodeAgent.Color,
+			Temperature: opencodeAgent.Temperature,
+			Tools:       opencodeAgent.Tools,
+			Hidden:      opencodeAgent.Hidden,
+			// Content is empty - will be lazy-loaded when needed
+		})
+	}
+
+	log.Info("Loaded minimal agent metadata", "count", len(agents))
+	return agents
+}
+
+// loadMinimalProviderForModel loads only the provider metadata needed for a specific model
+func (a *App) loadMinimalProviderForModel(configReader *opencode.ConfigReader, modelKey ModelKey) {
+	if modelKey.ProviderID == "" || modelKey.ModelID == "" {
+		return
+	}
+
+	// Read config to get provider details
+	config, err := configReader.ReadConfig()
+	if err != nil || config == nil {
+		return
+	}
+
+	// Find the specific provider
+	opencodeProvider, exists := config.Providers[modelKey.ProviderID]
+	if !exists {
+		log.Warn("Provider not found in OpenCode config", "provider", modelKey.ProviderID)
+		return
+	}
+
+	// Find the specific model
+	opencodeModel, exists := opencodeProvider.Models[modelKey.ModelID]
+	if !exists {
+		log.Warn("Model not found in OpenCode config", "provider", modelKey.ProviderID, "model", modelKey.ModelID)
+		return
+	}
+
+	// Create minimal provider with just this model
+	models := map[string]Model{
+		modelKey.ModelID: {
+			ID:         opencodeModel.ID,
+			Name:       opencodeModel.Name,
+			ProviderID: modelKey.ProviderID,
+			// Modalities and limits - only store what's needed for UI
+			Modalities: types.ModelModalities{
+				Input:  opencodeModel.Modalities.Input,
+				Output: opencodeModel.Modalities.Output,
+			},
+			Limit: types.ModelLimit{
+				Context: opencodeModel.Limit.Context,
+				Output:  opencodeModel.Limit.Output,
+			},
+			// Options omitted - only needed when making API calls
+		},
+	}
+
+	provider := Provider{
+		ID:        opencodeProvider.ID,
+		Name:      opencodeProvider.Name,
+		Models:    models,
+		Connected: false,
+		// APIKey and BaseURL omitted - only load when making API calls
+	}
+
+	// Store only this minimal provider
+	a.state.Local.Providers = []Provider{provider}
+	log.Info("Loaded minimal provider metadata", "provider", provider.ID, "model_count", 1)
+}
+
+// LoadFullAgent loads full agent details including content (lazy loading)
+func (a *App) LoadFullAgent(agentName string) (*Agent, error) {
+	configReader := opencode.DefaultConfigReader()
+
+	// Find agent file
+	opencodeAgents, err := configReader.ReadAgents()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agents: %w", err)
+	}
+
+	for _, opencodeAgent := range opencodeAgents {
+		if opencodeAgent.Name == agentName {
+			// Convert permission
+			permission := make(map[string]interface{})
+			for k, v := range opencodeAgent.Permission {
+				permission[k] = v
+			}
+
+			return &Agent{
+				Name:        opencodeAgent.Name,
+				Description: opencodeAgent.Description,
+				Mode:        opencodeAgent.Mode,
+				Color:       opencodeAgent.Color,
+				Temperature: opencodeAgent.Temperature,
+				Tools:       opencodeAgent.Tools,
+				Permission:  permission,
+				Content:     opencodeAgent.Content, // Full content loaded
+				Hidden:      opencodeAgent.Hidden,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("agent not found: %s", agentName)
+}
+
+// LoadFullProvider loads full provider details including API keys (lazy loading)
+func (a *App) LoadFullProvider(providerID string) (*Provider, error) {
+	configReader := opencode.DefaultConfigReader()
+
+	providers, err := configReader.ReadProviders()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read providers: %w", err)
+	}
+
+	for _, opencodeProvider := range providers {
+		if opencodeProvider.ID == providerID {
+			// Convert all models
+			models := make(map[string]Model)
+			for modelID, opencodeModel := range opencodeProvider.Models {
+				var thinkingOptions *types.ModelThinkingOptions
+				if opencodeModel.Options.Thinking != nil {
+					thinkingOptions = &types.ModelThinkingOptions{
+						Type:         opencodeModel.Options.Thinking.Type,
+						BudgetTokens: opencodeModel.Options.Thinking.BudgetTokens,
+					}
+				}
+
+				models[modelID] = Model{
+					ID:         opencodeModel.ID,
+					Name:       opencodeModel.Name,
+					ProviderID: providerID,
+					Modalities: types.ModelModalities{
+						Input:  opencodeModel.Modalities.Input,
+						Output: opencodeModel.Modalities.Output,
+					},
+					Options: types.ModelOptions{
+						Thinking: thinkingOptions,
+					},
+					Limit: types.ModelLimit{
+						Context: opencodeModel.Limit.Context,
+						Output:  opencodeModel.Limit.Output,
+					},
+				}
+			}
+
+			return &Provider{
+				ID:        opencodeProvider.ID,
+				Name:      opencodeProvider.Name,
+				Models:    models,
+				NPM:       opencodeProvider.NPM,
+				BaseURL:   opencodeProvider.BaseURL,
+				APIKey:    opencodeProvider.APIKey, // API key loaded
+				Connected: false,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("provider not found: %s", providerID)
+}
+
+// EnsureModelLoaded checks if a model is loaded and loads it if necessary
+// Returns true if the model is now available, false if it couldn't be loaded
+func (a *App) EnsureModelLoaded(modelKey ModelKey) bool {
+	// Check if model is already loaded
+	for _, provider := range a.state.Local.Providers {
+		if provider.ID == modelKey.ProviderID {
+			if _, exists := provider.Models[modelKey.ModelID]; exists {
+				return true // Model already loaded
+			}
+		}
+	}
+
+	// Model not loaded, need to load it
+	log.Info("Lazy-loading model", "provider", modelKey.ProviderID, "model", modelKey.ModelID)
+	configReader := opencode.DefaultConfigReader()
+	a.loadMinimalProviderForModel(configReader, modelKey)
+
+	// Verify it was loaded
+	for _, provider := range a.state.Local.Providers {
+		if provider.ID == modelKey.ProviderID {
+			if _, exists := provider.Models[modelKey.ModelID]; exists {
+				return true
+			}
+		}
+	}
+
+	log.Warn("Failed to load model", "provider", modelKey.ProviderID, "model", modelKey.ModelID)
+	return false
+}
+
+// SwitchAgent switches to a new agent and ensures its preferred model is loaded
+// This is called when subagents are invoked or when cycling agents
+func (a *App) SwitchAgent(agentName string) error {
+	// Get the agent
+	agent := a.state.GetAgent(agentName)
+	if agent == nil {
+		return fmt.Errorf("agent not found: %s", agentName)
+	}
+
+	// Set the agent
+	a.state.SetCurrentAgent(agentName)
+
+	// Update footer with new agent
+	a.footer.SetAgent(agentName, agent.Color)
+
+	// If agent has a preferred model, ensure it's loaded and switch to it
+	if agent.Model != nil {
+		if a.EnsureModelLoaded(*agent.Model) {
+			a.state.SetCurrentModel(*agent.Model)
+			// Update footer with agent's preferred model
+			a.updateFooterModel(*agent.Model)
+			log.Info("Switched to agent's preferred model", "agent", agentName, "model", agent.Model.ModelID)
+		} else {
+			log.Warn("Agent's preferred model not available, keeping current model", "agent", agentName, "model", agent.Model.ModelID)
+		}
+	}
+
+	return nil
+}
+
+// SafeCycleAgent cycles to the next/previous agent with lazy-loading support
+func (a *App) SafeCycleAgent(direction int) {
+	if len(a.state.Local.Agents) == 0 {
+		return
+	}
+
+	// Find current agent index
+	currentIdx := -1
+	for i, agent := range a.state.Local.Agents {
+		if agent.Name == a.state.Local.CurrentAgent {
+			currentIdx = i
+			break
+		}
+	}
+
+	// Calculate next index with wrapping
+	nextIdx := currentIdx + direction
+	if nextIdx < 0 {
+		nextIdx = len(a.state.Local.Agents) - 1
+	} else if nextIdx >= len(a.state.Local.Agents) {
+		nextIdx = 0
+	}
+
+	// Switch to the agent (handles model loading)
+	nextAgent := a.state.Local.Agents[nextIdx]
+	if err := a.SwitchAgent(nextAgent.Name); err != nil {
+		log.Warn("Failed to switch agent", "agent", nextAgent.Name, "error", err)
+	}
+}
+
+// SafeCycleModel cycles to the next/previous model with lazy-loading support
+func (a *App) SafeCycleModel(direction int) {
+	// Get all available models by reading full config
+	configReader := opencode.DefaultConfigReader()
+	config, err := configReader.ReadConfig()
+	if err != nil || config == nil {
+		log.Warn("Cannot cycle models: config not available")
+		return
+	}
+
+	// Build list of all available models
+	var allModels []ModelKey
+	for providerID, provider := range config.Providers {
+		for modelID := range provider.Models {
+			allModels = append(allModels, ModelKey{
+				ProviderID: providerID,
+				ModelID:    modelID,
+			})
+		}
+	}
+
+	if len(allModels) == 0 {
+		return
+	}
+
+	// Find current model index
+	currentIdx := -1
+	for i, model := range allModels {
+		if model.ProviderID == a.state.Local.CurrentModel.ProviderID &&
+			model.ModelID == a.state.Local.CurrentModel.ModelID {
+			currentIdx = i
+			break
+		}
+	}
+
+	// Calculate next index with wrapping
+	nextIdx := currentIdx + direction
+	if nextIdx < 0 {
+		nextIdx = len(allModels) - 1
+	} else if nextIdx >= len(allModels) {
+		nextIdx = 0
+	}
+
+	nextModel := allModels[nextIdx]
+
+	// Ensure the model is loaded before switching
+	if a.EnsureModelLoaded(nextModel) {
+		a.state.SetCurrentModel(nextModel)
+		// Update footer with new model
+		a.updateFooterModel(nextModel)
+		log.Info("Cycled to model", "provider", nextModel.ProviderID, "model", nextModel.ModelID)
+	} else {
+		log.Warn("Failed to cycle to model", "provider", nextModel.ProviderID, "model", nextModel.ModelID)
+	}
+}
+
+// ValidateCurrentModel checks if the current model is valid and loaded
+// If not, attempts to load a fallback model
+func (a *App) ValidateCurrentModel() bool {
+	// Check if current model is valid
+	if a.state.IsModelValid(a.state.Local.CurrentModel) {
+		return true
+	}
+
+	log.Warn("Current model not valid, attempting to load fallback")
+
+	// Try to load the current model
+	if a.EnsureModelLoaded(a.state.Local.CurrentModel) {
+		return true
+	}
+
+	// If that fails, try to get first valid model from config
+	configReader := opencode.DefaultConfigReader()
+	modelRef, err := configReader.GetFirstValidModel()
+	if err == nil && modelRef != nil {
+		fallbackModel := ModelKey{
+			ProviderID: modelRef.ProviderID,
+			ModelID:    modelRef.ModelID,
+		}
+		if a.EnsureModelLoaded(fallbackModel) {
+			a.state.SetCurrentModel(fallbackModel)
+			log.Info("Set fallback model", "provider", fallbackModel.ProviderID, "model", fallbackModel.ModelID)
+			return true
+		}
+	}
+
+	log.Error("No valid model available")
+	return false
+}
+
+// updateFooterModel updates the footer with the current model information
+func (a *App) updateFooterModel(modelKey ModelKey) {
+	// Find model name from providers
+	modelName := modelKey.ModelID
+	for _, provider := range a.state.Local.Providers {
+		if provider.ID == modelKey.ProviderID {
+			if model, exists := provider.Models[modelKey.ModelID]; exists {
+				modelName = model.Name
+				break
+			}
+		}
+	}
+	a.footer.SetModel(modelName, modelKey.ModelID)
+}
+
+// updateFooterAgent updates the footer with the current agent information
+func (a *App) updateFooterAgent() {
+	agent := a.state.GetCurrentAgent()
+	if agent != nil {
+		a.footer.SetAgent(agent.Name, agent.Color)
+	} else {
+		a.footer.SetAgent("default", "")
+	}
+}
+
+// triggerAutocomplete triggers autocomplete based on current input
+func (a *App) triggerAutocomplete() {
+	value := a.prompt.GetValue()
+	cursorPos := a.prompt.GetCursorPos()
+
+	// Get word at cursor
+	word := a.getWordAtCursor(value, cursorPos)
+
+	// Check for trigger characters
+	if strings.HasPrefix(word, "@") {
+		query := word[1:] // Remove @
+		options := a.getAgentCompletions(query)
+		a.prompt.GetAutocomplete().Show(options, "@", query)
+	} else if strings.HasPrefix(word, "/") {
+		// Only trigger / commands at start of line or after newline
+		beforeCursor := value[:cursorPos]
+		lastNewline := strings.LastIndex(beforeCursor, "\n")
+		if lastNewline == -1 || cursorPos-lastNewline <= len(word)+1 {
+			query := word[1:] // Remove /
+			options := a.getCommandCompletions(query)
+			a.prompt.GetAutocomplete().Show(options, "/", query)
+		}
+	}
+}
+
+// checkAutocomplete checks if autocomplete should be triggered or updated
+func (a *App) checkAutocomplete() {
+	value := a.prompt.GetValue()
+	cursorPos := a.prompt.GetCursorPos()
+
+	// Get word at cursor
+	word := a.getWordAtCursor(value, cursorPos)
+
+	// Check if we should trigger or update autocomplete
+	if strings.HasPrefix(word, "@") {
+		query := word[1:] // Remove @
+		if !a.prompt.IsAutocompleteVisible() || a.prompt.GetAutocomplete().GetTrigger() != "@" {
+			options := a.getAgentCompletions(query)
+			a.prompt.GetAutocomplete().Show(options, "@", query)
+		} else {
+			// Update existing autocomplete with new query
+			options := a.getAgentCompletions(query)
+			a.prompt.SetAutocompleteOptions(options)
+		}
+	} else if strings.HasPrefix(word, "/") {
+		// Only trigger / commands at start of line or after newline
+		beforeCursor := value[:cursorPos]
+		lastNewline := strings.LastIndex(beforeCursor, "\n")
+		if lastNewline == -1 || cursorPos-lastNewline <= len(word)+1 {
+			query := word[1:] // Remove /
+			if !a.prompt.IsAutocompleteVisible() || a.prompt.GetAutocomplete().GetTrigger() != "/" {
+				options := a.getCommandCompletions(query)
+				a.prompt.GetAutocomplete().Show(options, "/", query)
+			} else {
+				// Update existing autocomplete with new query
+				options := a.getCommandCompletions(query)
+				a.prompt.SetAutocompleteOptions(options)
+			}
+		}
+	} else if a.prompt.IsAutocompleteVisible() {
+		// Hide autocomplete if word doesn't start with trigger
+		a.prompt.HideAutocomplete()
+	}
+}
+
+// getWordAtCursor extracts the word at cursor position
+func (a *App) getWordAtCursor(text string, pos int) string {
+	if pos > len(text) {
+		pos = len(text)
+	}
+
+	// Find word boundaries
+	start := pos
+	for start > 0 && !isWordSeparator(text[start-1]) {
+		start--
+	}
+
+	end := pos
+	for end < len(text) && !isWordSeparator(text[end]) {
+		end++
+	}
+
+	return text[start:end]
+}
+
+// isWordSeparator checks if a character is a word separator
+func isWordSeparator(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// getAgentCompletions returns agent completions for @ trigger
+func (a *App) getAgentCompletions(query string) []layout.AutocompleteOption {
+	var options []layout.AutocompleteOption
+
+	// Add agents from state
+	for _, agent := range a.state.Local.Agents {
+		if query == "" || strings.Contains(strings.ToLower(agent.Name), strings.ToLower(query)) {
+			options = append(options, layout.AutocompleteOption{
+				Value:       "@" + agent.Name,
+				Display:     agent.Name,
+				Description: agent.Description,
+				Icon:        "🤖",
+			})
+		}
+	}
+
+	return options
+}
+
+// getCommandCompletions returns slash command completions
+func (a *App) getCommandCompletions(query string) []layout.AutocompleteOption {
+	commands := []struct {
+		Name        string
+		Description string
+		Icon        string
+	}{
+		{"status", "Show system status", "📊"},
+		{"compact", "Compact session history", "🗜"},
+		{"export", "Export session", "📤"},
+		{"help", "Show help", "❓"},
+		{"theme", "Change theme", "🎨"},
+		{"model", "Change model", "🤖"},
+		{"agent", "Change agent", "👤"},
+	}
+
+	var options []layout.AutocompleteOption
+	for _, cmd := range commands {
+		if query == "" || strings.HasPrefix(cmd.Name, query) {
+			options = append(options, layout.AutocompleteOption{
+				Value:       "/" + cmd.Name,
+				Display:     cmd.Name,
+				Description: cmd.Description,
+				Icon:        cmd.Icon,
+			})
+		}
+	}
+	return options
+}
+
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -228,6 +896,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StreamMsg:
 		a.appendToLastMessage(msg.Content)
+		// appendToLastMessage now handles SetContent and GotoBottom
 		if msg.Done {
 			a.state.Processing = false
 			a.mode = ModeInput
@@ -243,6 +912,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content:   msg.Content,
 				Timestamp: time.Now(),
 			})
+			// Auto-scroll to show new message
+			a.scrollToBottom(false)
 		}
 		a.state.Processing = false
 		a.mode = ModeInput
@@ -273,9 +944,41 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.state.SetMessages(msg.Messages)
 			a.messageViewport.SetContent(a.buildMessagesContent())
 			a.messageViewport.GotoBottom()
+			a.state.SetUserScrolled(false) // Reset scroll state
 			if len(msg.Messages) > 0 {
 				a.state.SetStatus(fmt.Sprintf("Loaded %d messages", len(msg.Messages)))
 			}
+		}
+
+	case MessagesLoadedMsg:
+		// Messages loaded from session switch
+		log.Info("MessagesLoadedMsg received",
+			"msgSessionID", msg.SessionID,
+			"currentSessionID", a.state.SessionID,
+			"messageCount", len(msg.Messages),
+			"match", msg.SessionID == a.state.SessionID)
+
+		if msg.SessionID == a.state.SessionID {
+			log.Info("Setting messages in state", "count", len(msg.Messages))
+			a.state.SetMessages(msg.Messages)
+
+			content := a.buildMessagesContent()
+			log.Info("Built content", "contentLen", len(content), "lines", strings.Count(content, "\n"))
+
+			a.messageViewport.SetContent(content)
+			log.Info("Set viewport content, total lines", "lines", a.messageViewport.TotalLineCount())
+
+			a.messageViewport.GotoBottom()
+			log.Info("GotoBottom called, YOffset", "offset", a.messageViewport.YOffset)
+
+			a.state.SetUserScrolled(false)
+			if len(msg.Messages) > 0 {
+				a.state.SetStatus(fmt.Sprintf("Loaded %d messages", len(msg.Messages)))
+			}
+		} else {
+			log.Warn("Session ID mismatch, not loading messages",
+				"msgSessionID", msg.SessionID,
+				"currentSessionID", a.state.SessionID)
 		}
 
 	case LoadMoreMessagesResult:
@@ -342,12 +1045,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	a.messageViewport, cmd = a.messageViewport.Update(msg)
 	cmds = append(cmds, cmd)
 
+	// Detect if user scrolled away from bottom
+	a.handleViewportScroll()
+
 	return a, tea.Batch(cmds...)
 }
 
 // ThemeChangeMsg is sent when the theme changes
 type ThemeChangeMsg struct {
 	ThemeID string
+}
+
+// MessagesLoadedMsg is sent when messages are loaded for a session
+type MessagesLoadedMsg struct {
+	SessionID string
+	Messages  []Message
 }
 
 // View renders the app (tea.Model interface)
@@ -462,8 +1174,23 @@ func (a *App) renderMainContent(height int) string {
 
 // renderChat renders the chat view
 func (a *App) renderChat(height int) string {
-	content := a.buildMessagesContent()
-	a.messageViewport.SetContent(content)
+	// Debug logging
+	msgCount := len(a.state.Sync.Messages)
+	vpLineCount := a.messageViewport.TotalLineCount()
+
+	if msgCount > 0 {
+		log.Info("renderChat",
+			"msgCount", msgCount,
+			"vpLineCount", vpLineCount,
+			"vpYOffset", a.messageViewport.YOffset,
+			"vpHeight", a.messageViewport.Height)
+	}
+
+	// Ensure content is set (in case it wasn't set elsewhere)
+	if vpLineCount == 0 && msgCount > 0 {
+		log.Info("renderChat: setting content because viewport is empty but messages exist")
+		a.messageViewport.SetContent(a.buildMessagesContent())
+	}
 
 	viewportStyle := lipgloss.NewStyle().Height(height)
 	return viewportStyle.Render(a.messageViewport.View())
@@ -577,28 +1304,73 @@ func (a *App) renderDialogModelList() string {
 func (a *App) buildMessagesContent() string {
 	var lines []string
 
+	// Calculate available width for text wrapping
+	// Subtract padding, timestamps, and other formatting
+	availableWidth := a.state.Layout.Width - 8
+	if availableWidth < 40 {
+		availableWidth = 40 // Minimum width
+	}
+
 	for _, msg := range a.state.Sync.Messages {
 		switch msg.Role {
 		case RoleUser:
 			timeStr := msg.Timestamp.Format("15:04")
-			userContent := fmt.Sprintf("[%s] You: %s", timeStr, msg.Content)
-			lines = append(lines, a.styles.UserMessage.Render(userContent))
+			prefix := fmt.Sprintf("[%s] You: ", timeStr)
+			prefixWidth := util.StringWidth(prefix)
+			contentWidth := availableWidth - prefixWidth
+			if contentWidth < 20 {
+				contentWidth = 20
+			}
+
+			// Wrap the content
+			wrappedContent := util.WrapPreserveNewlines(msg.Content, contentWidth)
+			for i, line := range wrappedContent {
+				if i == 0 {
+					lines = append(lines, a.styles.UserMessage.Render(prefix+line))
+				} else {
+					// Continuation lines get padding to align with content
+					padding := strings.Repeat(" ", prefixWidth)
+					lines = append(lines, a.styles.UserMessage.Render(padding+line))
+				}
+			}
 
 		case RoleAssistant:
 			timeStr := msg.Timestamp.Format("15:04")
 			if len(msg.Parts) > 0 {
-				partLines := a.renderParts(msg.Parts, msg.Model)
+				partLines := a.renderParts(msg.Parts, msg.Model, availableWidth)
 				lines = append(lines, partLines)
 			} else if msg.Content != "" {
-				assistantContent := fmt.Sprintf("[%s] Assistant: %s", timeStr, msg.Content)
+				var prefix string
 				if msg.Model != "" {
-					assistantContent = fmt.Sprintf("[%s] Assistant (%s): %s", timeStr, msg.Model, msg.Content)
+					prefix = fmt.Sprintf("[%s] Assistant (%s): ", timeStr, msg.Model)
+				} else {
+					prefix = fmt.Sprintf("[%s] Assistant: ", timeStr)
 				}
-				lines = append(lines, a.styles.AssistantMessage.Render(assistantContent))
+				prefixWidth := util.StringWidth(prefix)
+				contentWidth := availableWidth - prefixWidth
+				if contentWidth < 20 {
+					contentWidth = 20
+				}
+
+				// Wrap the content
+				wrappedContent := util.WrapPreserveNewlines(msg.Content, contentWidth)
+				for i, line := range wrappedContent {
+					if i == 0 {
+						lines = append(lines, a.styles.AssistantMessage.Render(prefix+line))
+					} else {
+						// Continuation lines get padding to align with content
+						padding := strings.Repeat(" ", prefixWidth)
+						lines = append(lines, a.styles.AssistantMessage.Render(padding+line))
+					}
+				}
 			}
 
 		case RoleSystem:
-			lines = append(lines, a.styles.SystemMessage.Render(msg.Content))
+			// System messages are typically short, but wrap just in case
+			wrappedContent := util.WrapPreserveNewlines(msg.Content, availableWidth)
+			for _, line := range wrappedContent {
+				lines = append(lines, a.styles.SystemMessage.Render(line))
+			}
 
 		case RoleTool:
 			toolLine := a.renderToolCall(msg.ToolCall)
@@ -610,11 +1382,11 @@ func (a *App) buildMessagesContent() string {
 		return a.styles.TextMuted.Render("No messages. Start a conversation!")
 	}
 
-	return strings.Join(lines, "\n\n")
+	return strings.Join(lines, "\n")
 }
 
 // renderParts renders assistant message parts
-func (a *App) renderParts(parts []Part, model string) string {
+func (a *App) renderParts(parts []Part, model string, width int) string {
 	var lines []string
 
 	header := "Assistant"
@@ -630,7 +1402,11 @@ func (a *App) renderParts(parts []Part, model string) string {
 		switch part.Type {
 		case "text":
 			if part.Text != "" {
-				lines = append(lines, a.styles.Text.Render(part.Text))
+				// Wrap text content
+				wrappedContent := util.WrapPreserveNewlines(part.Text, width)
+				for _, line := range wrappedContent {
+					lines = append(lines, a.styles.Text.Render(line))
+				}
 			}
 
 		case "tool_use":
@@ -643,9 +1419,23 @@ func (a *App) renderParts(parts []Part, model string) string {
 			toolResult := toolRenderer.RenderResult(part.ToolName, part.ToolInput, part.ToolResult, part.Status)
 			lines = append(lines, toolResult)
 
-		case "thinking":
+		case "reasoning":
+			// OpenCode uses "reasoning" as the part type for thinking blocks
 			if part.Text != "" {
-				lines = append(lines, a.styles.Thinking.Render(fmt.Sprintf("💭 %s", part.Text)))
+				// Wrap reasoning content
+				wrappedContent := util.WrapPreserveNewlines(part.Text, width)
+				for _, line := range wrappedContent {
+					lines = append(lines, a.styles.Thinking.Render(fmt.Sprintf("💭 %s", line)))
+				}
+			}
+
+		case "thinking":
+			// Also handle "thinking" for backwards compatibility
+			if part.Text != "" {
+				wrappedContent := util.WrapPreserveNewlines(part.Text, width)
+				for _, line := range wrappedContent {
+					lines = append(lines, a.styles.Thinking.Render(fmt.Sprintf("💭 %s", line)))
+				}
 			}
 		}
 	}
@@ -746,9 +1536,22 @@ func (a *App) handleDialogSelection(msg dialog.SelectMsg) tea.Cmd {
 			}
 			// Otherwise it's a session selection
 			if session, ok := msg.Data.(Session); ok {
+				log.Info("handleDialogSelection: switching session",
+					"sessionID", session.ID,
+					"title", session.Title,
+					"currentSessionID", a.state.SessionID)
+
+				// Clear viewport content immediately so user doesn't see stale messages
+				a.messageViewport.SetContent("")
+				log.Info("handleDialogSelection: cleared viewport content")
+
 				a.state.SetActiveSession(&session)
+				log.Info("handleDialogSelection: SetActiveSession called, new SessionID", "sessionID", a.state.SessionID)
+
 				a.activeDialog = nil
 				a.state.PopDialog()
+				log.Info("handleDialogSelection: dialog closed, loading messages...")
+
 				// Load messages for the selected session
 				return a.loadMessagesForSession(session.ID)
 			}
@@ -853,6 +1656,8 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case kb.Up.Match(msg):
 		a.messageViewport.LineUp(1)
+		// Mark that user has scrolled
+		a.state.Layout.UserScrolled = true
 		// Check if at top and need to load more
 		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
 			return a, a.loadMoreMessages()
@@ -861,10 +1666,16 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case kb.Down.Match(msg):
 		a.messageViewport.LineDown(1)
+		// Check if scrolled back to bottom
+		if a.isAtBottom() {
+			a.state.Layout.UserScrolled = false
+		}
 		return a, nil
 
 	case kb.PageUp.Match(msg):
 		a.messageViewport.HalfViewUp()
+		// Mark that user has scrolled
+		a.state.Layout.UserScrolled = true
 		// Check if at top and need to load more
 		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
 			return a, a.loadMoreMessages()
@@ -873,6 +1684,76 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case kb.PageDown.Match(msg):
 		a.messageViewport.HalfViewDown()
+		// Check if scrolled back to bottom
+		if a.isAtBottom() {
+			a.state.Layout.UserScrolled = false
+		}
+		return a, nil
+
+	// New navigation keybindings
+	case kb.HalfPageUp.Match(msg):
+		// Scroll half page up
+		a.messageViewport.HalfViewUp()
+		a.state.Layout.UserScrolled = true
+		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
+		return a, nil
+
+	case kb.HalfPageDown.Match(msg):
+		// Scroll half page down
+		a.messageViewport.HalfViewDown()
+		if a.isAtBottom() {
+			a.state.Layout.UserScrolled = false
+		}
+		return a, nil
+
+	case kb.FirstMessage.Match(msg):
+		// Jump to first message (Home)
+		a.messageViewport.GotoTop()
+		a.state.Layout.UserScrolled = true
+		// Check if we need to load more history
+		if a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
+		return a, nil
+
+	case kb.LastMessage.Match(msg):
+		// Jump to last message (End)
+		a.messageViewport.GotoBottom()
+		a.state.Layout.UserScrolled = false
+		return a, nil
+
+	// Also handle Ctrl+G for first message (OpenCode style)
+	case msg.String() == "ctrl+g":
+		a.messageViewport.GotoTop()
+		a.state.Layout.UserScrolled = true
+		if a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
+		return a, nil
+
+	// Also handle Ctrl+Alt+G for last message (OpenCode style)
+	case msg.String() == "ctrl+alt+g":
+		a.messageViewport.GotoBottom()
+		a.state.Layout.UserScrolled = false
+		return a, nil
+
+	// Also handle Ctrl+Alt+B for page up (OpenCode style)
+	case msg.String() == "ctrl+alt+b":
+		a.messageViewport.HalfViewUp()
+		a.state.Layout.UserScrolled = true
+		if a.atTopOfMessages() && a.state.HistoryMore(a.state.SessionID) && !a.state.HistoryLoading(a.state.SessionID) {
+			return a, a.loadMoreMessages()
+		}
+		return a, nil
+
+	// Also handle Ctrl+Alt+F for page down (OpenCode style)
+	case msg.String() == "ctrl+alt+f":
+		a.messageViewport.HalfViewDown()
+		if a.isAtBottom() {
+			a.state.Layout.UserScrolled = false
+		}
 		return a, nil
 
 	case kb.HistoryUp.Match(msg):
@@ -896,16 +1777,52 @@ func (a *App) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Pass to prompt's input if in input mode and not a control key
 	// This handles regular typing
 	if a.mode == ModeInput {
+		// Handle Tab key for autocomplete
+		if msg.Type == tea.KeyTab {
+			// Check if autocomplete is visible
+			if a.prompt.IsAutocompleteVisible() {
+				// Select current option
+				if option, ok := a.prompt.GetAutocomplete().Select(); ok {
+					a.prompt.InsertCompletion(option.Value)
+					a.prompt.HideAutocomplete()
+				}
+			} else {
+				// Trigger autocomplete
+				a.triggerAutocomplete()
+			}
+			return a, nil
+		}
+
+		// Handle Shift+Tab for navigating autocomplete
+		if msg.Type == tea.KeyShiftTab {
+			if a.prompt.IsAutocompleteVisible() {
+				a.prompt.GetAutocomplete().Previous()
+				return a, nil
+			}
+		}
+
+		// Handle Escape to hide autocomplete
+		if msg.Type == tea.KeyEsc {
+			if a.prompt.IsAutocompleteVisible() {
+				a.prompt.HideAutocomplete()
+				return a, nil
+			}
+		}
+
 		// Only pass printable characters and essential editing keys to input
 		switch msg.Type {
 		case tea.KeyRunes, tea.KeySpace, tea.KeyBackspace, tea.KeyDelete, tea.KeyLeft, tea.KeyRight:
 			// Update the prompt's internal input by passing the message to it
 			_, cmd := a.prompt.Update(msg)
+			// Check if we should trigger autocomplete after input update
+			a.checkAutocomplete()
 			return a, cmd
 		}
 		// Also handle keys with runes
 		if msg.Runes != nil && len(msg.Runes) > 0 {
 			_, cmd := a.prompt.Update(msg)
+			// Check if we should trigger autocomplete after input update
+			a.checkAutocomplete()
 			return a, cmd
 		}
 	}
@@ -1076,6 +1993,8 @@ func (a *App) handleSessionMsg(msg SessionMsg) {
 		for i, s := range a.state.Sync.Sessions {
 			if s.ID == msg.ID {
 				a.state.SetActiveSession(&a.state.Sync.Sessions[i])
+				// Scroll to bottom when switching sessions
+				a.scrollToBottom(true)
 				break
 			}
 		}
@@ -1158,17 +2077,18 @@ func (a *App) loadSessionsFromDB() tea.Cmd {
 // loadMessagesForSession loads messages for a specific session from the database
 func (a *App) loadMessagesForSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
+		log.Info("loadMessagesForSession: START", "sessionID", sessionID, "databasePath", a.databasePath)
+
 		if sessionID == "" || a.databasePath == "" {
+			log.Warn("loadMessagesForSession: missing sessionID or databasePath")
 			return nil
 		}
-
-		log.Info("Loading messages for session", "sessionID", sessionID)
 
 		ctx := context.Background()
 		db, err := database.New(ctx, database.Config{Path: a.databasePath})
 		if err != nil {
 			log.Error("Failed to open database for loading messages", "error", err.Error())
-			return nil
+			return ErrorMsg{Error: fmt.Errorf("failed to open database: %w", err)}
 		}
 		defer db.Close()
 
@@ -1176,23 +2096,31 @@ func (a *App) loadMessagesForSession(sessionID string) tea.Cmd {
 		messages, _, _, err := messageStorage.ListPaginated(ctx, sessionID, 80, 0)
 		if err != nil {
 			log.Error("Failed to load messages from database", "error", err.Error())
-			return nil
+			return ErrorMsg{Error: fmt.Errorf("failed to load messages: %w", err)}
 		}
 
-		log.Info("Loaded messages for session", "sessionID", sessionID, "count", len(messages))
+		log.Info("loadMessagesForSession: loaded from DB", "sessionID", sessionID, "count", len(messages))
 
 		// Convert database messages to UI messages
 		uiMessages := make([]Message, 0, len(messages))
-		for _, dbMsg := range messages {
+		for i, dbMsg := range messages {
 			uiMsg := convertDBMessageToTUI(dbMsg)
 			uiMessages = append(uiMessages, uiMsg)
+			if i < 3 { // Log first 3 messages for debugging
+				log.Info("loadMessagesForSession: message",
+					"index", i,
+					"role", uiMsg.Role,
+					"contentPreview", uiMsg.Content[:min(50, len(uiMsg.Content))])
+			}
 		}
 
-		// Update state with loaded messages
-		a.state.Sync.Messages = uiMessages
-		a.state.SetStatus(fmt.Sprintf("Loaded %d messages", len(uiMessages)))
+		log.Info("loadMessagesForSession: returning MessagesLoadedMsg", "sessionID", sessionID, "uiMessageCount", len(uiMessages))
 
-		return nil
+		// Return a message to trigger update
+		return MessagesLoadedMsg{
+			SessionID: sessionID,
+			Messages:  uiMessages,
+		}
 	}
 }
 
@@ -1200,6 +2128,7 @@ func (a *App) loadMessagesForSession(sessionID string) tea.Cmd {
 func (a *App) addMessage(msg Message) {
 	msg.ID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
 	a.state.AddMessage(msg)
+	a.messageViewport.SetContent(a.buildMessagesContent())
 	a.messageViewport.GotoBottom()
 }
 
@@ -1211,6 +2140,7 @@ func (a *App) appendToLastMessage(content string) {
 		if last.Role == RoleAssistant {
 			last.Content += content
 			a.messageViewport.SetContent(a.buildMessagesContent())
+			a.messageViewport.GotoBottom()
 		}
 	}
 }
@@ -1262,6 +2192,59 @@ func (a *App) updateViewportSize() {
 
 	a.messageViewport.Width = contentWidth
 	a.messageViewport.Height = contentHeight
+}
+
+// scrollToBottom scrolls the viewport to the bottom
+// force: if true, scroll regardless of userScrolled state
+func (a *App) scrollToBottom(force bool) {
+	// Don't auto-scroll if user has scrolled up (unless forced)
+	if !force && a.state.IsUserScrolled() {
+		return
+	}
+
+	// Get content height (total lines)
+	content := a.buildMessagesContent()
+	lines := strings.Split(content, "\n")
+	contentHeight := len(lines)
+
+	// Calculate if we need to scroll
+	viewportHeight := a.messageViewport.Height
+	if contentHeight > viewportHeight {
+		// Scroll to show the last lines
+		offset := contentHeight - viewportHeight
+		if offset < 0 {
+			offset = 0
+		}
+		a.messageViewport.SetYOffset(offset)
+		a.state.SetUserScrolled(false)
+	}
+}
+
+// handleViewportScroll detects if user has scrolled away from bottom
+// Call this whenever the viewport is scrolled
+func (a *App) handleViewportScroll() {
+	content := a.buildMessagesContent()
+	lines := strings.Split(content, "\n")
+	contentHeight := len(lines)
+	viewportHeight := a.messageViewport.Height
+	currentOffset := a.messageViewport.YOffset
+
+	// Check if there's content to scroll
+	if contentHeight <= viewportHeight {
+		a.state.SetUserScrolled(false)
+		return
+	}
+
+	// Calculate distance from bottom
+	maxOffset := contentHeight - viewportHeight
+	distanceFromBottom := maxOffset - currentOffset
+
+	// If user scrolled up (more than 2 lines from bottom), mark as userScrolled
+	if distanceFromBottom > 2 {
+		a.state.SetUserScrolled(true)
+	} else {
+		a.state.SetUserScrolled(false)
+	}
 }
 
 // buildHelpContent builds the help content
@@ -1360,6 +2343,19 @@ func (a *App) Styles() ThemeStyles {
 // atTopOfMessages returns true if viewport is at the top of messages
 func (a *App) atTopOfMessages() bool {
 	return a.messageViewport.YOffset <= 1
+}
+
+// isAtBottom returns true if viewport is at the bottom of messages
+func (a *App) isAtBottom() bool {
+	contentHeight := a.messageViewport.TotalLineCount()
+	viewportHeight := a.messageViewport.Height
+	currentOffset := a.messageViewport.YOffset
+
+	// Calculate distance from bottom
+	distanceFromBottom := contentHeight - viewportHeight - currentOffset
+
+	// Consider "at bottom" if within 2 lines of the bottom
+	return distanceFromBottom <= 2
 }
 
 // loadMoreMessages returns a command to load more messages from history
@@ -1472,6 +2468,7 @@ func convertDBMessageToTUI(dbMsg database.Message) Message {
 
 // convertPartsToTUI converts database parts to TUI parts
 // Filters out internal parts (patch, step-start, step-finish)
+// OpenCode part types: text, reasoning, file, tool_use, tool_result
 func convertPartsToTUI(parts []database.Part) []Part {
 	skipParts := map[string]bool{
 		"patch":       true,
@@ -1492,13 +2489,24 @@ func convertPartsToTUI(parts []database.Part) []Part {
 			Status: p.Data.Status,
 		}
 
+		// Handle specific part types
 		if p.Data.Type == "file" {
 			tuiPart.Text = fmt.Sprintf("[File: %s]", p.Data.Filename)
+		}
+
+		// Reasoning/thinking parts - text is copied directly
+		// OpenCode uses "reasoning" type for thinking blocks
+		if p.Data.Type == "reasoning" || p.Data.Type == "thinking" {
+			// Text field already contains the reasoning content
 		}
 
 		if p.Data.Type == "tool_use" || p.Data.Type == "tool_result" {
 			tuiPart.ToolName = p.Data.ToolName
 			tuiPart.ToolID = p.Data.ToolID
+			// Convert tool input to string if it's a map
+			if p.Data.ToolInput != nil {
+				tuiPart.ToolInput = fmt.Sprintf("%v", p.Data.ToolInput)
+			}
 			if p.Data.Type == "tool_result" {
 				tuiPart.ToolResult = p.Data.ToolResult
 			}

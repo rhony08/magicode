@@ -14,6 +14,8 @@ import (
 // FooterConfig holds configuration for the footer
 type FooterConfig struct {
 	ShowDirectory bool // Whether to show current directory
+	ShowAgent     bool // Whether to show current agent
+	ShowModel     bool // Whether to show current model
 	ShowLSPMCP    bool // Whether to show LSP/MCP count
 	ShowHint      bool // Whether to show status hint
 }
@@ -22,6 +24,8 @@ type FooterConfig struct {
 func DefaultFooterConfig() FooterConfig {
 	return FooterConfig{
 		ShowDirectory: true,
+		ShowAgent:     true,
+		ShowModel:     true,
 		ShowLSPMCP:    true,
 		ShowHint:      true,
 	}
@@ -33,18 +37,27 @@ type Footer struct {
 	theme  types.Theme
 	styles FooterStyles
 	width  int
+	// Agent display
+	agentName  string
+	agentColor string
+	// Model display
+	modelName string
+	modelID   string
 }
 
 // FooterStyles holds lipgloss styles for footer
 type FooterStyles struct {
 	Container  lipgloss.Style
 	Left       lipgloss.Style
+	Center     lipgloss.Style
 	Right      lipgloss.Style
 	Text       lipgloss.Style
 	TextMuted  lipgloss.Style
 	Indicator  lipgloss.Style
 	StatusHint lipgloss.Style
 	Separator  lipgloss.Style
+	AgentName  lipgloss.Style
+	ModelName  lipgloss.Style
 }
 
 // NewFooter creates a new footer component
@@ -55,6 +68,9 @@ func NewFooter(config FooterConfig, theme types.Theme) *Footer {
 			Foreground(theme.Text).
 			Padding(0, 1),
 		Left: lipgloss.NewStyle().
+			Foreground(theme.TextMuted).
+			Padding(0, 1),
+		Center: lipgloss.NewStyle().
 			Foreground(theme.TextMuted).
 			Padding(0, 1),
 		Right: lipgloss.NewStyle().
@@ -69,6 +85,10 @@ func NewFooter(config FooterConfig, theme types.Theme) *Footer {
 		StatusHint: lipgloss.NewStyle().
 			Foreground(theme.Primary),
 		Separator: lipgloss.NewStyle().
+			Foreground(theme.TextMuted),
+		AgentName: lipgloss.NewStyle().
+			Bold(true),
+		ModelName: lipgloss.NewStyle().
 			Foreground(theme.TextMuted),
 	}
 
@@ -101,9 +121,13 @@ func (f *Footer) Render(state *types.AppState) string {
 		return ""
 	}
 
-	// Split footer into left and right sections
-	leftWidth := f.width / 2
-	rightWidth := f.width / 2
+	// Determine layout based on terminal width
+	// Narrow (< 60): directory only
+	// Medium (60-79): directory + agent/model
+	// Wide (>= 80): directory + agent/model + LSP/MCP + hint
+	isNarrow := f.width < 60
+	isMedium := f.width >= 60 && f.width < 80
+	isWide := f.width >= 80
 
 	// ===========================================
 	// Left Section: Directory path
@@ -115,17 +139,23 @@ func (f *Footer) Render(state *types.AppState) string {
 			dir = state.Sync.Sessions[0].Directory
 		}
 		if dir == "" {
-			dir = "~" // Default placeholder
+			dir = "~"
+		}
+
+		// Calculate available width for directory
+		dirWidth := f.width / 3
+		if isNarrow {
+			dirWidth = f.width - 10 // Leave space for minimal right content
 		}
 
 		// Truncate directory path if needed
-		if len(dir) > leftWidth-4 {
+		if len(dir) > dirWidth-2 {
 			parts := strings.Split(dir, "/")
 			if len(parts) > 3 {
 				dir = ".../" + strings.Join(parts[len(parts)-2:], "/")
 			}
-			if len(dir) > leftWidth-4 {
-				dir = dir[:leftWidth-7] + "..."
+			if len(dir) > dirWidth-2 {
+				dir = dir[:dirWidth-5] + "..."
 			}
 		}
 
@@ -133,12 +163,55 @@ func (f *Footer) Render(state *types.AppState) string {
 	}
 
 	// ===========================================
+	// Center Section: Agent + Model (wide only)
+	// ===========================================
+	var centerContent string
+	if !isNarrow && (f.config.ShowAgent || f.config.ShowModel) {
+		var centerParts []string
+
+		// Agent display with color
+		if f.config.ShowAgent && f.agentName != "" {
+			agentStyle := f.styles.AgentName.Copy()
+			if f.agentColor != "" {
+				agentStyle = agentStyle.Foreground(lipgloss.Color(f.agentColor))
+			} else {
+				agentStyle = agentStyle.Foreground(f.theme.Primary)
+			}
+			agentDisplay := "🤖 " + f.agentName
+			if isMedium {
+				// Shorten agent name on medium width
+				if len(f.agentName) > 12 {
+					agentDisplay = "🤖 " + f.agentName[:10] + ".."
+				}
+			}
+			centerParts = append(centerParts, agentStyle.Render(agentDisplay))
+		}
+
+		// Model display
+		if f.config.ShowModel && f.modelName != "" {
+			modelDisplay := "⚡ " + f.modelName
+			if isMedium {
+				// Shorten model name on medium width
+				if len(f.modelName) > 15 {
+					modelDisplay = "⚡ " + f.modelName[:13] + ".."
+				}
+			}
+			centerParts = append(centerParts, f.styles.ModelName.Render(modelDisplay))
+		}
+
+		if len(centerParts) > 0 {
+			centerContent = strings.Join(centerParts, f.styles.Separator.Render(" · "))
+		}
+	}
+
+	// ===========================================
 	// Right Section: LSP/MCP count + status hint
 	// ===========================================
+	var rightContent string
 	var rightParts []string
 
-	// LSP/MCP indicators
-	if f.config.ShowLSPMCP && state != nil {
+	// LSP/MCP indicators (wide only)
+	if isWide && f.config.ShowLSPMCP && state != nil {
 		lspCount := len(state.Sync.LSPServers)
 		mcpCount := len(state.Sync.MCPServers)
 		if lspCount > 0 || mcpCount > 0 {
@@ -150,35 +223,81 @@ func (f *Footer) Render(state *types.AppState) string {
 		}
 	}
 
-	// Separator
-	if len(rightParts) > 0 && f.config.ShowHint {
-		rightParts = append(rightParts, f.styles.Separator.Render("·"))
-	}
-
-	// Status hint
-	if f.config.ShowHint {
+	// Status hint (wide only)
+	if isWide && f.config.ShowHint {
+		if len(rightParts) > 0 {
+			rightParts = append(rightParts, f.styles.Separator.Render("·"))
+		}
 		rightParts = append(rightParts, f.styles.StatusHint.Render("/status"))
 	}
 
-	rightContent := strings.Join(rightParts, " ")
+	rightContent = strings.Join(rightParts, " ")
 
 	// ===========================================
-	// Combine left and right
+	// Combine sections based on width
 	// ===========================================
+	if isNarrow {
+		// Narrow: Directory (left) + minimal right
+		leftStyle := lipgloss.NewStyle().
+			Width(f.width - 10).
+			Align(lipgloss.Left)
+		rightStyle := lipgloss.NewStyle().
+			Width(10).
+			Align(lipgloss.Right)
+
+		row := lipgloss.JoinHorizontal(lipgloss.Top,
+			leftStyle.Render(leftContent),
+			rightStyle.Render(rightContent),
+		)
+
+		return f.styles.Container.
+			Width(f.width).
+			Render(row)
+	}
+
+	if isMedium {
+		// Medium: Directory (left) + Agent/Model (center-right)
+		leftWidth := f.width / 3
+		centerWidth := f.width - leftWidth
+
+		leftStyle := lipgloss.NewStyle().
+			Width(leftWidth).
+			Align(lipgloss.Left)
+		centerStyle := lipgloss.NewStyle().
+			Width(centerWidth).
+			Align(lipgloss.Right)
+
+		row := lipgloss.JoinHorizontal(lipgloss.Top,
+			leftStyle.Render(leftContent),
+			centerStyle.Render(centerContent),
+		)
+
+		return f.styles.Container.
+			Width(f.width).
+			Render(row)
+	}
+
+	// Wide: Directory (left) + Agent/Model (center) + LSP/MCP/Hint (right)
+	leftWidth := f.width / 3
+	centerWidth := f.width / 3
+	rightWidth := f.width - leftWidth - centerWidth
+
 	leftStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Align(lipgloss.Left)
-
+	centerStyle := lipgloss.NewStyle().
+		Width(centerWidth).
+		Align(lipgloss.Center)
 	rightStyle := lipgloss.NewStyle().
 		Width(rightWidth).
 		Align(lipgloss.Right)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top,
 		leftStyle.Render(leftContent),
+		centerStyle.Render(centerContent),
 		rightStyle.Render(rightContent),
 	)
 
-	// Apply container style
 	return f.styles.Container.
 		Width(f.width).
 		Render(row)
@@ -192,6 +311,28 @@ func (f *Footer) SetWidth(width int) {
 // Width returns the footer width
 func (f *Footer) Width() int {
 	return f.width
+}
+
+// SetAgent updates the displayed agent
+func (f *Footer) SetAgent(name string, color string) {
+	f.agentName = name
+	f.agentColor = color
+}
+
+// SetModel updates the displayed model
+func (f *Footer) SetModel(name string, id string) {
+	f.modelName = name
+	f.modelID = id
+}
+
+// GetAgent returns the current agent name
+func (f *Footer) GetAgent() string {
+	return f.agentName
+}
+
+// GetModel returns the current model name
+func (f *Footer) GetModel() string {
+	return f.modelName
 }
 
 // ===========================================

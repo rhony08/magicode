@@ -175,10 +175,14 @@ func (r *ToolResultRenderer) renderEdit(filePath string, output string, status s
 		Foreground(r.theme.TextMuted)
 	lines = append(lines, pathStyle.Render(filePath))
 
-	// Diff content
+	// Diff content - use the new diff renderer
 	if output != "" {
 		lines = append(lines, "")
-		lines = append(lines, r.renderDiff(output))
+		diffRenderer := NewDiffRenderer(r.theme, r.styles)
+		diffRenderer.SetWidth(80) // Default width
+		diffRenderer.SetWrapLines(true)
+		// Use simple diff for backwards compatibility with existing tool output
+		lines = append(lines, diffRenderer.RenderUnifiedSimple(output))
 	}
 
 	// Status

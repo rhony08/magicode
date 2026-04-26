@@ -33,11 +33,11 @@ func (t *Timestamps) UpdateTimestamps() {
 // Project represents a project record
 type Project struct {
 	ID              string     `json:"id"`
-	Worktree        string     `json:"worktree"`         // Required
-	VCS             string     `json:"vcs"`              // Optional: git, etc.
-	Name            string     `json:"name"`             // Optional
-	IconURL         string     `json:"icon_url"`         // Optional
-	IconColor       string     `json:"icon_color"`       // Optional
+	Worktree        string     `json:"worktree"`   // Required
+	VCS             string     `json:"vcs"`        // Optional: git, etc.
+	Name            string     `json:"name"`       // Optional
+	IconURL         string     `json:"icon_url"`   // Optional
+	IconColor       string     `json:"icon_color"` // Optional
 	Timestamps      Timestamps `json:"timestamps"`
 	TimeInitialized int64      `json:"time_initialized"` // Optional
 	Sandboxes       []string   `json:"sandboxes"`        // JSON array
@@ -71,13 +71,13 @@ type Session struct {
 	Revert           *RevertInfo `json:"revert"`            // Optional JSON
 	Permission       *Ruleset    `json:"permission"`        // Optional JSON
 	Timestamps       Timestamps  `json:"timestamps"`
-	TimeCompacting   int64       `json:"time_compacting"`   // Optional
-	TimeArchived     int64       `json:"time_archived"`     // Optional
+	TimeCompacting   int64       `json:"time_compacting"` // Optional
+	TimeArchived     int64       `json:"time_archived"`   // Optional
 }
 
 // FileDiff represents a file diff entry
 type FileDiff struct {
-	Path     string `json:"path"`
+	Path      string `json:"path"`
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
 }
@@ -102,9 +102,9 @@ type Ruleset struct {
 
 // Message represents a message in a session
 type Message struct {
-	ID        string     `json:"id"`
-	SessionID string     `json:"session_id"` // Required, FK to session
-	Timestamps Timestamps `json:"timestamps"`
+	ID         string      `json:"id"`
+	SessionID  string      `json:"session_id"` // Required, FK to session
+	Timestamps Timestamps  `json:"timestamps"`
 	Data       MessageInfo `json:"data"` // JSON
 }
 
@@ -130,28 +130,30 @@ type MessageInfo struct {
 
 // Part represents a part of a message
 type Part struct {
-	ID        string     `json:"id"`
-	MessageID string     `json:"message_id"` // Required, FK to message
-	SessionID string     `json:"session_id"` // Required
+	ID         string     `json:"id"`
+	MessageID  string     `json:"message_id"` // Required, FK to message
+	SessionID  string     `json:"session_id"` // Required
 	Timestamps Timestamps `json:"timestamps"`
 	Data       PartData   `json:"data"` // JSON
 }
 
 // PartData represents part content (matches actual database schema)
+// Part types: text, reasoning (thinking), file, tool_use, tool_result, step-start, step-finish, patch
+// Note: OpenCode uses "reasoning" type for thinking blocks (not "thinking")
 type PartData struct {
-	Type      string                 `json:"type"`      // text, file, tool_use, tool_result, step-start, thinking
-	Text      string                 `json:"text"`      // For text parts
-	Synthetic bool                   `json:"synthetic"` // Optional flag for synthetic parts
-	Mime      string                 `json:"mime"`      // For file parts
-	Filename  string                 `json:"filename"`  // For file parts
-	URL       string                 `json:"url"`       // For file parts
-	Source    map[string]interface{} `json:"source"`    // For file parts
-	ToolID    string                 `json:"toolID"`    // For tool parts
-	ToolName  string                 `json:"toolName"`  // For tool parts
-	ToolInput map[string]any         `json:"toolInput"` // For tool_use
-	ToolResult string                `json:"toolResult"` // For tool_result
-	Status    string                 `json:"status"`    // pending, running, success, error
-	Error     string                 `json:"error"`     // For error status
+	Type       string                 `json:"type"`       // text, reasoning, file, tool_use, tool_result, step-start, etc.
+	Text       string                 `json:"text"`       // For text/reasoning parts
+	Synthetic  bool                   `json:"synthetic"`  // Optional flag for synthetic parts
+	Mime       string                 `json:"mime"`       // For file parts
+	Filename   string                 `json:"filename"`   // For file parts
+	URL        string                 `json:"url"`        // For file parts
+	Source     map[string]interface{} `json:"source"`     // For file parts
+	ToolID     string                 `json:"toolID"`     // For tool parts
+	ToolName   string                 `json:"toolName"`   // For tool parts
+	ToolInput  map[string]any         `json:"toolInput"`  // For tool_use
+	ToolResult string                 `json:"toolResult"` // For tool_result
+	Status     string                 `json:"status"`     // pending, running, success, error
+	Error      string                 `json:"error"`      // For error status
 }
 
 // ===========================================
@@ -160,11 +162,11 @@ type PartData struct {
 
 // Todo represents a todo item in a session
 type Todo struct {
-	SessionID string     `json:"session_id"` // Required, FK to session
-	Content   string     `json:"content"`    // Required
-	Status    string     `json:"status"`     // pending, in_progress, completed, cancelled
-	Priority  string     `json:"priority"`   // high, medium, low
-	Position  int        `json:"position"`   // Required for ordering
+	SessionID  string     `json:"session_id"` // Required, FK to session
+	Content    string     `json:"content"`    // Required
+	Status     string     `json:"status"`     // pending, in_progress, completed, cancelled
+	Priority   string     `json:"priority"`   // high, medium, low
+	Position   int        `json:"position"`   // Required for ordering
 	Timestamps Timestamps `json:"timestamps"`
 }
 
@@ -174,11 +176,11 @@ type Todo struct {
 
 // SessionEntry represents an entry in a session (for event tracking)
 type SessionEntry struct {
-	ID        string      `json:"id"`
-	SessionID string      `json:"session_id"` // Required, FK to session
-	Type      string      `json:"type"`       // Entry type
-	Timestamps Timestamps  `json:"timestamps"`
-	Data      EntryData   `json:"data"`       // JSON
+	ID         string     `json:"id"`
+	SessionID  string     `json:"session_id"` // Required, FK to session
+	Type       string     `json:"type"`       // Entry type
+	Timestamps Timestamps `json:"timestamps"`
+	Data       EntryData  `json:"data"` // JSON
 }
 
 // EntryData represents session entry data (generic)
@@ -190,9 +192,9 @@ type EntryData map[string]any
 
 // Permission represents project-level permission settings
 type Permission struct {
-	ProjectID string     `json:"project_id"` // PK, FK to project
+	ProjectID  string     `json:"project_id"` // PK, FK to project
 	Timestamps Timestamps `json:"timestamps"`
-	Data       Ruleset    `json:"data"`       // JSON
+	Data       Ruleset    `json:"data"` // JSON
 }
 
 // ===========================================
@@ -231,9 +233,9 @@ type Account struct {
 
 // AccountState represents active account state (single row)
 type AccountState struct {
-	ID             int    `json:"id"`               // PK (always 1)
+	ID              int    `json:"id"`                // PK (always 1)
 	ActiveAccountID string `json:"active_account_id"` // FK to account
-	ActiveOrgID    string `json:"active_org_id"`    // Optional
+	ActiveOrgID     string `json:"active_org_id"`     // Optional
 }
 
 // ControlAccount represents legacy account (multi-account by email+url)
@@ -253,10 +255,10 @@ type ControlAccount struct {
 
 // SessionShare represents a shared session
 type SessionShare struct {
-	SessionID string     `json:"session_id"` // PK, FK to session
-	ID        string     `json:"id"`         // Share ID
-	Secret    string     `json:"secret"`     // Share secret
-	URL       string     `json:"url"`        // Share URL
+	SessionID  string     `json:"session_id"` // PK, FK to session
+	ID         string     `json:"id"`         // Share ID
+	Secret     string     `json:"secret"`     // Share secret
+	URL        string     `json:"url"`        // Share URL
 	Timestamps Timestamps `json:"timestamps"`
 }
 
