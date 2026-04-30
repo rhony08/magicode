@@ -20,6 +20,8 @@ func (s *Server) setupInstanceRoutes() {
 	instance.Delete("/session/:id", s.handleDeleteSession)
 	instance.Get("/session/:id/message", s.handleGetMessages)
 	instance.Post("/session/:id/message", s.handleAddMessage)
+	instance.Post("/session/:id/prompt_async", s.handlePromptAsync) // Async message processing
+	instance.Get("/session/:id/events", s.handleSessionEventStream)  // SSE per session
 	instance.Post("/session/:id/run", s.handleRunSession)
 	instance.Post("/session/:id/cancel", s.handleCancelSession)
 	instance.Post("/session/:id/abort", s.handleAbortSession)

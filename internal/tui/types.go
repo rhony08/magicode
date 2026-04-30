@@ -133,6 +133,73 @@ type (
 		Error   error
 	}
 
+	// StreamPartCreatedMsg is sent when a new part is created during streaming
+	StreamPartCreatedMsg struct {
+		SessionID string
+		MessageID string
+		PartID    string
+		Index     int
+		Type      string // "text", "reasoning", "tool_use"
+	}
+
+	// StreamPartUpdatedMsg is sent when a part gets new content
+	StreamPartUpdatedMsg struct {
+		SessionID string
+		MessageID string
+		PartID    string
+		Index     int
+		Delta     string // Text delta
+		DeltaType string // "text", "reasoning", "tool_input"
+	}
+
+	// StreamPartCompleteMsg is sent when a part is finished
+	StreamPartCompleteMsg struct {
+		SessionID string
+		MessageID string
+		PartID    string
+		Index     int
+	}
+
+	// StreamMessageCompleteMsg is sent when the whole message is finished
+	StreamMessageCompleteMsg struct {
+		SessionID string
+		MessageID string
+	}
+
+	// StreamToolPendingMsg is sent when a tool call starts
+	StreamToolPendingMsg struct {
+		SessionID string
+		MessageID string
+		PartID    string
+		ToolName  string
+		ToolID    string
+		Input     string
+	}
+
+	// StreamToolRunningMsg is sent when tool execution starts
+	StreamToolRunningMsg struct {
+		SessionID string
+		ToolID    string
+		ToolName  string
+	}
+
+	// StreamToolCompleteMsg is sent when tool execution finishes
+	StreamToolCompleteMsg struct {
+		SessionID string
+		ToolID    string
+		ToolName  string
+		Result    string
+		IsError   bool
+	}
+
+	// StreamErrorMsg is sent when an error occurs during streaming
+	StreamErrorMsg struct {
+		SessionID string
+		MessageID string
+		Error     string
+		ErrorType string
+	}
+
 	// ToolCallMsg is a tool call event
 	ToolCallMsg struct {
 		Tool   string

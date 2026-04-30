@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
+	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/opencode"
 	"github.com/rhony08/magicode/internal/provider"
@@ -52,6 +53,12 @@ type App struct {
 	processor        *session.Processor
 	providerRegistry *provider.ProviderRegistry
 	toolRegistry     *tool.Registry
+
+	// Event channel for streaming updates (from bus to tea)
+	eventChan chan tea.Msg
+
+	// Bus service reference (for cleanup)
+	busService *bus.Service
 
 	// UI components - layout package
 	sidebar       *layout.Sidebar
@@ -105,6 +112,7 @@ type Config struct {
 	Processor        *session.Processor
 	ProviderRegistry *provider.ProviderRegistry
 	ToolRegistry     *tool.Registry
+	BusService       *bus.Service // Bus service for streaming events
 }
 
 // workingDirectory returns the working directory from config or current directory
@@ -181,30 +189,32 @@ func NewApp(cfg Config) *App {
 	keybindHints := layout.NewKeybindHintBar(theme)
 
 	app := &App{
-		state:            state,
-		theme:            theme,
-		styles:           styles,
-		databasePath:     cfg.DatabasePath,
-		workingDirectory: cfg.workingDirectory(),
-		useOpenCode:      cfg.UseOpenCode,
+		state:              state,
+		theme:              theme,
+		styles:             styles,
+		databasePath:       cfg.DatabasePath,
+		workingDirectory:   cfg.workingDirectory(),
+		useOpenCode:        cfg.UseOpenCode,
 		configDefaultModel: cfg.DefaultModel,
-		processor:        cfg.Processor,
-		providerRegistry: cfg.ProviderRegistry,
-		toolRegistry:     cfg.ToolRegistry,
-		sidebar:          sidebar,
-		mobileSidebar:    mobileSidebar,
-		footer:           footer,
-		statusBar:        statusBar,
-		prompt:           prompt,
-		keybindHints:     keybindHints,
-		leaderHandler:    NewLeaderKeyHandler(),
-		input:            ti,
-		spinner:          s,
-		messageViewport:  vp,
-		view:             ViewChat,
-		mode:             ModeInput,
-		helpContent:      help,
-		keybindings:      DefaultKeybindings(),
+		processor:          cfg.Processor,
+		providerRegistry:   cfg.ProviderRegistry,
+		toolRegistry:       cfg.ToolRegistry,
+		busService:         cfg.BusService,
+		eventChan:          make(chan tea.Msg, 100), // Buffer for streaming events
+		sidebar:            sidebar,
+		mobileSidebar:      mobileSidebar,
+		footer:             footer,
+		statusBar:          statusBar,
+		prompt:             prompt,
+		keybindHints:       keybindHints,
+		leaderHandler:      NewLeaderKeyHandler(),
+		input:              ti,
+		spinner:            s,
+		messageViewport:    vp,
+		view:               ViewChat,
+		mode:               ModeInput,
+		helpContent:        help,
+		keybindings:        DefaultKeybindings(),
 	}
 
 	return app
@@ -216,6 +226,111 @@ func (a *App) SetProcessor(processor *session.Processor, providerRegistry *provi
 	a.processor = processor
 	a.providerRegistry = providerRegistry
 	a.toolRegistry = toolRegistry
+}
+
+// SetBusService sets the bus service for streaming events
+func (a *App) SetBusService(busService *bus.Service) {
+	a.busService = busService
+}
+
+// subscribeToBus subscribes to bus events and converts them to tea.Msg
+func (a *App) subscribeToBus() tea.Cmd {
+	if a.busService == nil {
+		return nil
+	}
+
+	// Subscribe to part updates
+	partUpdatedChan, cleanupPart := a.busService.Subscribe(session.EventPartUpdated)
+	go func() {
+		defer cleanupPart()
+		for payload := range partUpdatedChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamPartUpdatedMsg{
+				SessionID: props["session_id"].(string),
+				MessageID: props["message_id"].(string),
+				PartID:    props["part_id"].(string),
+				Index:     props["index"].(int),
+				Delta:     props["delta"].(string),
+				DeltaType: props["delta_type"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to part created
+	partCreatedChan, cleanupCreated := a.busService.Subscribe(session.EventPartCreated)
+	go func() {
+		defer cleanupCreated()
+		for payload := range partCreatedChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamPartCreatedMsg{
+				SessionID: props["session_id"].(string),
+				MessageID: props["message_id"].(string),
+				PartID:    props["part_id"].(string),
+				Index:     props["index"].(int),
+				Type:      props["type"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to message complete
+	msgCompleteChan, cleanupComplete := a.busService.Subscribe(session.EventMessageComplete)
+	go func() {
+		defer cleanupComplete()
+		for payload := range msgCompleteChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamMessageCompleteMsg{
+				SessionID: props["session_id"].(string),
+				MessageID: props["message_id"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to tool events
+	toolPendingChan, cleanupTool := a.busService.Subscribe(session.EventToolCallPending)
+	go func() {
+		defer cleanupTool()
+		for payload := range toolPendingChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamToolPendingMsg{
+				SessionID: props["session_id"].(string),
+				MessageID: props["message_id"].(string),
+				PartID:    props["part_id"].(string),
+				ToolName:  props["tool_name"].(string),
+				ToolID:    props["tool_id"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to error events
+	errorChan, cleanupError := a.busService.Subscribe(session.EventStreamError)
+	go func() {
+		defer cleanupError()
+		for payload := range errorChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamErrorMsg{
+				SessionID: props["session_id"].(string),
+				Error:     props["error"].(string),
+				ErrorType: props["error_type"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Return a command that waits for events from the channel
+	return tea.Batch(
+		a.waitForEvent(),
+	)
+}
+
+// waitForEvent returns a command that waits for the next event
+func (a *App) waitForEvent() tea.Cmd {
+	return func() tea.Msg {
+		return <-a.eventChan
+	}
 }
 
 // Init initializes the app (tea.Model interface)
@@ -276,6 +391,7 @@ func (a *App) Init() tea.Cmd {
 		a.spinner.Tick,
 		textinput.Blink,
 		a.loadSessionsFromDB(), // Load sessions from database on startup
+		a.subscribeToBus(),     // Subscribe to bus events for streaming
 	)
 }
 
@@ -1026,6 +1142,66 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Status: msg.Status,
 			},
 		})
+
+	// Streaming events from bus
+	case StreamPartCreatedMsg:
+		// New part created - start tracking it for streaming updates
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamPartCreated(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamPartUpdatedMsg:
+		// Part received new content - append to display
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamPartUpdated(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamPartCompleteMsg:
+		// Part finished - mark as complete
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamPartComplete(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamMessageCompleteMsg:
+		// Whole message finished
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamMessageComplete(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamToolPendingMsg:
+		// Tool call started
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamToolPending(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamToolRunningMsg:
+		// Tool execution started
+		if msg.SessionID == a.state.SessionID {
+			a.state.SetStatus(fmt.Sprintf("Running: %s", msg.ToolName))
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamToolCompleteMsg:
+		// Tool execution finished
+		if msg.SessionID == a.state.SessionID {
+			a.handleStreamToolComplete(msg)
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
+
+	case StreamErrorMsg:
+		// Error during streaming
+		if msg.SessionID == a.state.SessionID {
+			a.setError(fmt.Errorf("%s: %s", msg.ErrorType, msg.Error))
+			a.state.Processing = false
+			a.mode = ModeInput
+			a.state.SetStatus("Error")
+			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+		}
 
 	case SessionMsg:
 		a.handleSessionMsg(msg)
@@ -2308,6 +2484,74 @@ func (a *App) setError(err error) {
 	a.errorTimer = time.AfterFunc(3*time.Second, func() {
 		a.state.ShowError = false
 	})
+}
+
+// ===========================================
+// Streaming Event Handlers
+// ===========================================
+
+// handleStreamPartCreated handles when a new part is created during streaming
+func (a *App) handleStreamPartCreated(msg StreamPartCreatedMsg) {
+	// For now, just update status
+	a.state.SetStatus("Streaming...")
+
+	// If this is a tool_use, show it immediately
+	if msg.Type == "tool_use" {
+		a.state.SetStatus("Tool call pending...")
+	}
+}
+
+// handleStreamPartUpdated handles when a part receives new content
+func (a *App) handleStreamPartUpdated(msg StreamPartUpdatedMsg) {
+	// Append delta to last message if it's an assistant message
+	messages := a.state.Sync.Messages
+	if len(messages) > 0 {
+		last := &messages[len(messages)-1]
+		if last.Role == RoleAssistant {
+			// Append delta to content
+			last.Content += msg.Delta
+
+			// Update viewport
+			a.messageViewport.SetContent(a.buildMessagesContent())
+
+			// Auto-scroll if not at bottom (only if user hasn't scrolled away)
+			if !a.state.Layout.UserScrolled {
+				a.messageViewport.GotoBottom()
+			}
+		}
+	}
+}
+
+// handleStreamPartComplete handles when a part is finished
+func (a *App) handleStreamPartComplete(msg StreamPartCompleteMsg) {
+	// Mark part as complete (could add visual indicator)
+	// Continue showing the content
+}
+
+// handleStreamMessageComplete handles when the whole message is finished
+func (a *App) handleStreamMessageComplete(msg StreamMessageCompleteMsg) {
+	// Mark processing as done
+	a.state.Processing = false
+	a.mode = ModeInput
+	a.state.SetStatus("Ready")
+
+	// Refresh viewport to show final content
+	a.messageViewport.SetContent(a.buildMessagesContent())
+	a.messageViewport.GotoBottom()
+}
+
+// handleStreamToolPending handles when a tool call starts
+func (a *App) handleStreamToolPending(msg StreamToolPendingMsg) {
+	a.state.SetStatus(fmt.Sprintf("Tool: %s...", msg.ToolName))
+}
+
+// handleStreamToolComplete handles when tool execution finishes
+func (a *App) handleStreamToolComplete(msg StreamToolCompleteMsg) {
+	if msg.IsError {
+		a.state.SetStatus(fmt.Sprintf("Tool error: %s", msg.ToolName))
+	} else {
+		a.state.SetStatus(fmt.Sprintf("Tool done: %s", msg.ToolName))
+	}
 }
 
 // navigateHistoryUp navigates input history up

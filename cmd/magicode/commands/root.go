@@ -296,6 +296,7 @@ tuiConfig := tui.Config{
 	tuiConfig.ProviderRegistry = providerRegistry
 	tuiConfig.ToolRegistry = toolRegistry
 	tuiConfig.Processor = processor
+	tuiConfig.BusService = busService
 
 	// Set default model in TUI config
 	if defaultModel != "" {
@@ -319,11 +320,6 @@ tuiConfig := tui.Config{
 
 	// Create the TUI app
 	app := tui.NewApp(tuiConfig)
-
-	// Subscribe TUI to bus events for streaming updates
-	if busService != nil {
-		subscribeTUIToBus(app, busService)
-	}
 
 	// Run the TUI
 	p := tea.NewProgram(
@@ -665,46 +661,4 @@ func registerAllTools(registry *tool.Registry) {
 	registry.Register(tool.NewGlobTool())
 	registry.Register(tool.NewGrepTool())
 	registry.Register(tool.NewWebFetchTool())
-}
-
-// subscribeTUIToBus subscribes the TUI app to bus events for real-time updates
-func subscribeTUIToBus(app *tui.App, busService *bus.Service) {
-	// Subscribe to part updates for streaming text
-	partUpdatedChan, cleanup := busService.Subscribe(session.EventPartUpdated)
-	go func() {
-		for payload := range partUpdatedChan {
-			// Extract delta text
-			props := payload.Properties.(map[string]interface{})
-			delta, ok := props["delta"].(string)
-			if !ok {
-				continue
-			}
-
-			// Send tea.Msg to update viewport
-			// Note: In a real implementation, we'd use a channel to send to tea program
-			// For now, we log the streaming event
-			log.Info("Stream delta", "delta", delta)
-		}
-		cleanup()
-	}()
-
-	// Subscribe to message completion
-	msgCompleteChan, cleanup2 := busService.Subscribe(session.EventMessageComplete)
-	go func() {
-		for payload := range msgCompleteChan {
-			props := payload.Properties.(map[string]interface{})
-			log.Info("Message complete", "message_id", props["message_id"])
-		}
-		cleanup2()
-	}()
-
-	// Subscribe to tool events
-	toolPendingChan, cleanup3 := busService.Subscribe(session.EventToolCallPending)
-	go func() {
-		for payload := range toolPendingChan {
-			props := payload.Properties.(map[string]interface{})
-			log.Info("Tool pending", "tool_name", props["tool_name"])
-		}
-		cleanup3()
-	}()
 }

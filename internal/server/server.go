@@ -15,6 +15,7 @@ import (
 	"github.com/rhony08/magicode/internal/lsp"
 	"github.com/rhony08/magicode/internal/pty"
 	"github.com/rhony08/magicode/internal/provider"
+	"github.com/rhony08/magicode/internal/session"
 	"github.com/rhony08/magicode/internal/tool"
 )
 
@@ -79,13 +80,14 @@ func DefaultConfig() Config {
 
 // Services holds all service references for the server
 type Services struct {
-	DB       *database.Database
-	Config   *config.Service
-	Bus      *bus.Service
-	Provider *provider.ProviderRegistry
-	PTY      *pty.Manager
-	LSP      *lsp.Manager
-	Tools    *tool.Registry
+	DB        *database.Database
+	Config    *config.Service
+	Bus       *bus.Service
+	Provider  *provider.ProviderRegistry
+	PTY       *pty.Manager
+	LSP       *lsp.Manager
+	Tools     *tool.Registry
+	Processor *session.Processor // Session message processor
 }
 
 // Server represents the MagiCode HTTP server.
