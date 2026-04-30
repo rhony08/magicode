@@ -60,6 +60,9 @@ type App struct {
 	// Bus service reference (for cleanup)
 	busService *bus.Service
 
+	// Streaming state - tracks current streaming message and parts
+	streamingState streamingState
+
 	// UI components - layout package
 	sidebar       *layout.Sidebar
 	mobileSidebar *layout.MobileSidebar
@@ -113,6 +116,14 @@ type Config struct {
 	ProviderRegistry *provider.ProviderRegistry
 	ToolRegistry     *tool.Registry
 	BusService       *bus.Service // Bus service for streaming events
+}
+
+// streamingState tracks current streaming message state for real-time updates
+type streamingState struct {
+	sessionID string        // Session being streamed
+	messageID string        // Message being streamed
+	parts     map[int]*Part // Parts by index (for delta appending)
+	isActive  bool          // Whether streaming is active
 }
 
 // workingDirectory returns the working directory from config or current directory
@@ -188,33 +199,34 @@ func NewApp(cfg Config) *App {
 	prompt := layout.NewPrompt(layout.DefaultPromptConfig(), theme)
 	keybindHints := layout.NewKeybindHintBar(theme)
 
-	app := &App{
-		state:              state,
-		theme:              theme,
-		styles:             styles,
-		databasePath:       cfg.DatabasePath,
-		workingDirectory:   cfg.workingDirectory(),
-		useOpenCode:        cfg.UseOpenCode,
+app := &App{
+		state:            state,
+		theme:            theme,
+		styles:           styles,
+		databasePath:     cfg.DatabasePath,
+		workingDirectory: cfg.workingDirectory(),
+		useOpenCode:      cfg.UseOpenCode,
 		configDefaultModel: cfg.DefaultModel,
-		processor:          cfg.Processor,
-		providerRegistry:   cfg.ProviderRegistry,
-		toolRegistry:       cfg.ToolRegistry,
-		busService:         cfg.BusService,
-		eventChan:          make(chan tea.Msg, 100), // Buffer for streaming events
-		sidebar:            sidebar,
-		mobileSidebar:      mobileSidebar,
-		footer:             footer,
-		statusBar:          statusBar,
-		prompt:             prompt,
-		keybindHints:       keybindHints,
-		leaderHandler:      NewLeaderKeyHandler(),
-		input:              ti,
-		spinner:            s,
-		messageViewport:    vp,
-		view:               ViewChat,
-		mode:               ModeInput,
-		helpContent:        help,
-		keybindings:        DefaultKeybindings(),
+		processor:        cfg.Processor,
+		providerRegistry: cfg.ProviderRegistry,
+		toolRegistry:     cfg.ToolRegistry,
+		busService:       cfg.BusService,
+		eventChan:        make(chan tea.Msg, 100), // Buffer for streaming events
+		streamingState:   streamingState{parts: make(map[int]*Part)},
+		sidebar:          sidebar,
+		mobileSidebar:    mobileSidebar,
+		footer:           footer,
+		statusBar:        statusBar,
+		prompt:           prompt,
+		keybindHints:     keybindHints,
+		leaderHandler:    NewLeaderKeyHandler(),
+		input:            ti,
+		spinner:          s,
+		messageViewport:  vp,
+		view:             ViewChat,
+		mode:             ModeInput,
+		helpContent:      help,
+		keybindings:      DefaultKeybindings(),
 	}
 
 	return app
@@ -1175,15 +1187,36 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StreamToolPendingMsg:
 		// Tool call started
 		if msg.SessionID == a.state.SessionID {
-			a.handleStreamToolPending(msg)
+a.handleStreamToolPending(msg)
 			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
 		}
 
 	case StreamToolRunningMsg:
 		// Tool execution started
 		if msg.SessionID == a.state.SessionID {
+			// Find the part for this tool and update status to running
+			for _, part := range a.streamingState.parts {
+				if part.ToolID == msg.ToolID {
+					part.Status = "running"
+
+					// Update in message's Parts array
+					messages := a.state.Sync.Messages
+					if len(messages) > 0 {
+						last := &messages[len(messages)-1]
+						if last.ID == a.streamingState.messageID {
+							for i := range last.Parts {
+								if last.Parts[i].ToolID == msg.ToolID {
+									last.Parts[i].Status = "running"
+								}
+							}
+						}
+					}
+					break
+				}
+			}
+
 			a.state.SetStatus(fmt.Sprintf("Running: %s", msg.ToolName))
-			cmds = append(cmds, a.waitForEvent()) // Continue waiting for events
+			cmds = append(cmds, a.waitForEvent())
 		}
 
 	case StreamToolCompleteMsg:
@@ -2492,61 +2525,216 @@ func (a *App) setError(err error) {
 
 // handleStreamPartCreated handles when a new part is created during streaming
 func (a *App) handleStreamPartCreated(msg StreamPartCreatedMsg) {
-	// For now, just update status
-	a.state.SetStatus("Streaming...")
+	// Initialize streaming state for new message if needed
+	if !a.streamingState.isActive || a.streamingState.messageID != msg.MessageID {
+		a.streamingState = streamingState{
+			sessionID: msg.SessionID,
+			messageID: msg.MessageID,
+			parts:     make(map[int]*Part),
+			isActive:  true,
+		}
 
-	// If this is a tool_use, show it immediately
-	if msg.Type == "tool_use" {
-		a.state.SetStatus("Tool call pending...")
+		// Create a new assistant message placeholder
+		a.addMessage(Message{
+			ID:        msg.MessageID,
+			Role:      RoleAssistant,
+			Timestamp: time.Now(),
+			Parts:     []Part{},
+			Model:     a.state.Local.CurrentModel.ModelID,
+			Provider:  a.state.Local.CurrentModel.ProviderID,
+		})
 	}
+
+	// Create the new part
+	newPart := &Part{
+		ID:    msg.PartID,
+		Index: msg.Index,
+		Type:  msg.Type,
+		Text:  "",
+		Status: "streaming",
+	}
+
+	// Track it in streaming state
+	a.streamingState.parts[msg.Index] = newPart
+
+	// Add it to the message's Parts array
+	messages := a.state.Sync.Messages
+	if len(messages) > 0 {
+		last := &messages[len(messages)-1]
+		if last.ID == msg.MessageID {
+			// Ensure Parts array has space for this index
+			if len(last.Parts) <= msg.Index {
+				// Extend array
+				extended := make([]Part, msg.Index+1)
+				copy(extended, last.Parts)
+				last.Parts = extended
+			}
+			last.Parts[msg.Index] = *newPart
+		}
+	}
+
+	// Update viewport
+	a.messageViewport.SetContent(a.buildMessagesContent())
+	a.messageViewport.GotoBottom()
 }
 
 // handleStreamPartUpdated handles when a part receives new content
 func (a *App) handleStreamPartUpdated(msg StreamPartUpdatedMsg) {
-	// Append delta to last message if it's an assistant message
+	// Find the part in streaming state
+	part, exists := a.streamingState.parts[msg.Index]
+	if !exists {
+		return
+	}
+
+	// Append delta based on type
+	switch msg.DeltaType {
+	case "text":
+		part.Text += msg.Delta
+	case "reasoning":
+		part.Text += msg.Delta
+	case "tool_input":
+		// Tool input is being streamed (JSON fragments)
+		part.ToolInput += msg.Delta
+	}
+
+	// Update the message's Parts array
 	messages := a.state.Sync.Messages
 	if len(messages) > 0 {
 		last := &messages[len(messages)-1]
-		if last.Role == RoleAssistant {
-			// Append delta to content
-			last.Content += msg.Delta
-
-			// Update viewport
-			a.messageViewport.SetContent(a.buildMessagesContent())
-
-			// Auto-scroll if not at bottom (only if user hasn't scrolled away)
-			if !a.state.Layout.UserScrolled {
-				a.messageViewport.GotoBottom()
-			}
+		if last.ID == a.streamingState.messageID && msg.Index < len(last.Parts) {
+			// Copy updated part to message
+			last.Parts[msg.Index] = *part
 		}
+	}
+
+	// Update viewport to show streaming content
+	a.messageViewport.SetContent(a.buildMessagesContent())
+
+	// Auto-scroll if not at bottom (only if user hasn't scrolled away)
+	if !a.state.Layout.UserScrolled {
+		a.messageViewport.GotoBottom()
 	}
 }
 
 // handleStreamPartComplete handles when a part is finished
 func (a *App) handleStreamPartComplete(msg StreamPartCompleteMsg) {
-	// Mark part as complete (could add visual indicator)
-	// Continue showing the content
+	// Find the part and mark as complete
+	part, exists := a.streamingState.parts[msg.Index]
+	if exists {
+		part.Status = "complete"
+
+		// Update in message's Parts array
+		messages := a.state.Sync.Messages
+		if len(messages) > 0 {
+			last := &messages[len(messages)-1]
+			if last.ID == a.streamingState.messageID && msg.Index < len(last.Parts) {
+				last.Parts[msg.Index].Status = "complete"
+			}
+		}
+	}
+
+	// Update viewport
+	a.messageViewport.SetContent(a.buildMessagesContent())
 }
 
 // handleStreamMessageComplete handles when the whole message is finished
 func (a *App) handleStreamMessageComplete(msg StreamMessageCompleteMsg) {
+	// Clear streaming state
+	a.streamingState.isActive = false
+	a.streamingState.parts = make(map[int]*Part)
+
 	// Mark processing as done
 	a.state.Processing = false
 	a.mode = ModeInput
 	a.state.SetStatus("Ready")
 
-	// Refresh viewport to show final content
+	// Final viewport update
 	a.messageViewport.SetContent(a.buildMessagesContent())
 	a.messageViewport.GotoBottom()
 }
 
 // handleStreamToolPending handles when a tool call starts
 func (a *App) handleStreamToolPending(msg StreamToolPendingMsg) {
+	// Find the part for this tool
+	part, exists := a.streamingState.parts[msg.PartIndex]
+	if exists {
+		// Update tool part with tool details
+		part.Type = "tool_use"
+		part.ToolID = msg.ToolID
+		part.ToolName = msg.ToolName
+		part.Status = "pending"
+		if msg.Input != "" {
+			part.ToolInput = msg.Input
+		}
+
+		// Update in message's Parts array
+		messages := a.state.Sync.Messages
+		if len(messages) > 0 {
+			last := &messages[len(messages)-1]
+			if last.ID == a.streamingState.messageID && msg.PartIndex < len(last.Parts) {
+				last.Parts[msg.PartIndex] = *part
+			}
+		}
+	}
+
+	// Update status and viewport
 	a.state.SetStatus(fmt.Sprintf("Tool: %s...", msg.ToolName))
+	a.messageViewport.SetContent(a.buildMessagesContent())
 }
 
 // handleStreamToolComplete handles when tool execution finishes
 func (a *App) handleStreamToolComplete(msg StreamToolCompleteMsg) {
+	// Find the tool_use part and create corresponding tool_result
+	for idx, part := range a.streamingState.parts {
+		if part.ToolID == msg.ToolID {
+			// Mark tool_use as complete
+			part.Status = "complete"
+
+			// Update in message's Parts array
+			messages := a.state.Sync.Messages
+			if len(messages) > 0 {
+				last := &messages[len(messages)-1]
+				if last.ID == a.streamingState.messageID {
+					// Update tool_use part
+					if idx < len(last.Parts) {
+						last.Parts[idx].Status = "complete"
+						if msg.IsError {
+							last.Parts[idx].Status = "error"
+						}
+					}
+
+					// Add tool_result part after tool_use
+					resultPart := Part{
+						ID:         uuid.New().String(),
+						Index:      idx + 1,
+						Type:       "tool_result",
+						ToolID:     msg.ToolID,
+						ToolName:   msg.ToolName,
+						ToolResult: msg.Result,
+						Status:     "complete",
+					}
+					if msg.IsError {
+						resultPart.Status = "error"
+					}
+
+					// Insert after tool_use
+					if idx+1 < len(last.Parts) {
+						last.Parts[idx+1] = resultPart
+					} else {
+						last.Parts = append(last.Parts, resultPart)
+					}
+
+					// Also track in streaming state
+					a.streamingState.parts[idx+1] = &resultPart
+				}
+			}
+			break
+		}
+	}
+
+	// Update viewport
+	a.messageViewport.SetContent(a.buildMessagesContent())
+
 	if msg.IsError {
 		a.state.SetStatus(fmt.Sprintf("Tool error: %s", msg.ToolName))
 	} else {

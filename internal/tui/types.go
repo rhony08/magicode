@@ -171,6 +171,7 @@ type (
 		SessionID string
 		MessageID string
 		PartID    string
+		PartIndex int    // Index of the part in message
 		ToolName  string
 		ToolID    string
 		Input     string

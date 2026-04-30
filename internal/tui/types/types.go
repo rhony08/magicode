@@ -370,13 +370,14 @@ const (
 // OpenCode uses "reasoning" type for thinking blocks (not "thinking")
 type Part struct {
 	ID         string `json:"id"`
-	Type       string `json:"type"` // text, reasoning, file, tool_use, tool_result
+	Index      int    `json:"index"` // Position in message (for streaming tracking)
+	Type       string `json:"type"`  // text, reasoning, file, tool_use, tool_result
 	Text       string `json:"text,omitempty"`
 	ToolID     string `json:"tool_id,omitempty"`
 	ToolName   string `json:"tool_name,omitempty"`
 	ToolInput  string `json:"tool_input,omitempty"`
 	ToolResult string `json:"tool_result,omitempty"`
-	Status     string `json:"status,omitempty"` // pending, running, success, error
+	Status     string `json:"status,omitempty"` // pending, running, success, error, streaming
 }
 
 // ToolCall represents a tool call
