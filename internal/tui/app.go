@@ -45,6 +45,9 @@ type App struct {
 	// OpenCode configuration flag
 	useOpenCode bool
 
+	// Default model from config/session (for fallback)
+	configDefaultModel ModelKey
+
 	// AI processing
 	processor        *session.Processor
 	providerRegistry *provider.ProviderRegistry
@@ -96,6 +99,7 @@ type Config struct {
 	MessageMeta     MessageMeta // Pagination metadata for initial load
 	DatabasePath    string      // Database path for loading more messages
 	UseOpenCode     bool        // Use OpenCode configuration for agents/providers
+	DefaultModel    ModelKey    // Default model from config/session (optional)
 
 	// AI processing components (optional, can be set later with SetProcessor)
 	Processor        *session.Processor
@@ -183,6 +187,7 @@ func NewApp(cfg Config) *App {
 		databasePath:     cfg.DatabasePath,
 		workingDirectory: cfg.workingDirectory(),
 		useOpenCode:      cfg.UseOpenCode,
+		configDefaultModel: cfg.DefaultModel,
 		processor:        cfg.Processor,
 		providerRegistry: cfg.ProviderRegistry,
 		toolRegistry:     cfg.ToolRegistry,
@@ -226,14 +231,40 @@ func (a *App) Init() tea.Cmd {
 		}
 	}
 
-	// Sync OpenCode config if enabled
+	// Initialize providers based on config source
 	if a.useOpenCode {
+		// Use OpenCode config - sync will load minimal providers
 		a.syncOpenCodeConfig()
-	} else {
-		// Initialize footer with defaults when not using OpenCode
-		a.updateFooterAgent()
-		a.updateFooterModel(a.state.Local.CurrentModel)
+	} else if a.providerRegistry != nil {
+		// Use provider registry (from env vars) when not using OpenCode config
+		a.populateProvidersFromRegistry()
 	}
+
+	// Set default model if provided in config (from session or config file)
+	if a.state.Local.CurrentModel.ProviderID == "" {
+		// First check if DefaultModel was passed in config
+		if cfgDefaultModel, ok := a.getConfigDefaultModel(); ok && cfgDefaultModel.ProviderID != "" {
+			a.state.SetCurrentModel(cfgDefaultModel)
+			log.Info("Set model from config default", "provider", cfgDefaultModel.ProviderID, "model", cfgDefaultModel.ModelID)
+		} else if len(a.state.Local.Providers) > 0 {
+			// Pick first available model from loaded providers
+			for _, prov := range a.state.Local.Providers {
+				for modelID := range prov.Models {
+					a.state.Local.CurrentModel = ModelKey{
+						ProviderID: prov.ID,
+						ModelID:    modelID,
+					}
+					log.Info("Set default model from providers", "provider", prov.ID, "model", modelID)
+					break
+				}
+				break
+			}
+		}
+	}
+
+	// Initialize footer with current agent and model
+	a.updateFooterAgent()
+	a.updateFooterModel(a.state.Local.CurrentModel)
 
 	// Set initial viewport content if there are messages
 	if len(a.state.Sync.Messages) > 0 {
@@ -751,6 +782,47 @@ func (a *App) updateFooterAgent() {
 	} else {
 		a.footer.SetAgent("default", "")
 	}
+}
+
+// populateProvidersFromRegistry populates state providers from the provider registry
+func (a *App) populateProvidersFromRegistry() {
+	if a.providerRegistry == nil {
+		return
+	}
+
+	providers := a.providerRegistry.ListProviders()
+	for _, prov := range providers {
+		info := prov.Info()
+
+		// Convert to TUI Provider type
+		tuiProvider := Provider{
+			ID:        string(info.ID),
+			Name:      info.Name,
+			Connected: true, // Assume connected if registered
+			Models:    make(map[string]Model),
+		}
+
+		// Add models
+		for modelID, modelInfo := range info.Models {
+			_, modelName := provider.ParseModelID(modelID)
+			tuiProvider.Models[modelName] = Model{
+				ID:   modelName,
+				Name: modelInfo.Name,
+			}
+		}
+
+		a.state.Local.Providers = append(a.state.Local.Providers, tuiProvider)
+	}
+
+	log.Info("Populated providers from registry", "count", len(a.state.Local.Providers))
+}
+
+// getConfigDefaultModel returns the default model passed in config
+func (a *App) getConfigDefaultModel() (ModelKey, bool) {
+	if a.configDefaultModel.ProviderID != "" && a.configDefaultModel.ModelID != "" {
+		return a.configDefaultModel, true
+	}
+	return ModelKey{}, false
 }
 
 // triggerAutocomplete triggers autocomplete based on current input

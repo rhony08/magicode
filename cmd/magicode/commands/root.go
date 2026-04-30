@@ -9,9 +9,13 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/config"
 	"github.com/rhony08/magicode/internal/database"
 	"github.com/rhony08/magicode/internal/global"
+	"github.com/rhony08/magicode/internal/provider"
+	"github.com/rhony08/magicode/internal/session"
+	"github.com/rhony08/magicode/internal/tool"
 	"github.com/rhony08/magicode/internal/tui"
 	"github.com/rhony08/magicode/internal/util/log"
 	"github.com/spf13/cobra"
@@ -240,7 +244,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		title = fmt.Sprintf("%s - %s", appName, sessionTitle)
 	}
 
-	tuiConfig := tui.Config{
+tuiConfig := tui.Config{
 		Title:           title,
 		InitialMessages: initialMessages,
 		SessionID:       sessionID,
@@ -251,6 +255,55 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			Loading:  false,
 		},
 		DatabasePath: global.DatabasePath(),
+		Directory:    directory,
+		UseOpenCode:  viper.GetBool("use-opencode"),
+	}
+
+	// If continuing a session, pass it to TUI
+	if sessionID != "" {
+		tuiConfig.Session = tui.Session{
+			ID:        sessionID,
+			Title:     sessionTitle,
+			Directory: sessionDirectory,
+			CreatedAt: time.Now(),
+			Active:    true,
+		}
+	}
+
+	// Determine default model:
+	// 1. If continuing session, use model from last assistant message
+	// 2. Otherwise, use model from config file
+	var defaultModel string
+	if sessionID != "" && len(initialMessages) > 0 {
+		// Find last assistant message's model
+		for i := len(initialMessages) - 1; i >= 0; i-- {
+			if initialMessages[i].Role == tui.RoleAssistant && initialMessages[i].Model != "" {
+				defaultModel = initialMessages[i].Provider + "/" + initialMessages[i].Model
+				log.Info("Using model from last assistant message", "model", defaultModel)
+				break
+			}
+		}
+	}
+	if defaultModel == "" {
+		// Use model from config
+		defaultModel = cfg.Model()
+		log.Info("Using model from config", "model", defaultModel)
+	}
+
+	// Initialize AI processing components (lazy loading - only default provider)
+	ctx := context.Background()
+	providerRegistry, toolRegistry, busService, processor := initializeAIComponents(ctx, directory, defaultModel)
+	tuiConfig.ProviderRegistry = providerRegistry
+	tuiConfig.ToolRegistry = toolRegistry
+	tuiConfig.Processor = processor
+
+	// Set default model in TUI config
+	if defaultModel != "" {
+		provID, modelID := parseModelString(defaultModel)
+		tuiConfig.DefaultModel = tui.ModelKey{
+			ProviderID: string(provID),
+			ModelID:    modelID,
+		}
 	}
 
 	// If continuing a session, pass it to TUI
@@ -266,6 +319,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create the TUI app
 	app := tui.NewApp(tuiConfig)
+
+	// Subscribe TUI to bus events for streaming updates
+	if busService != nil {
+		subscribeTUIToBus(app, busService)
+	}
 
 	// Run the TUI
 	p := tea.NewProgram(
@@ -371,4 +429,282 @@ func convertPartsToTUI(parts []database.Part) []tui.Part {
 		result = append(result, tuiPart)
 	}
 	return result
+}
+
+// initializeAIComponents initializes AI processing components with lazy loading
+// Only initializes the provider for the default/used model, not all providers
+func initializeAIComponents(ctx context.Context, workDir string, defaultModel string) (*provider.ProviderRegistry, *tool.Registry, *bus.Service, *session.Processor) {
+	// 1. Create provider registry (empty initially)
+	registry := provider.NewProviderRegistry()
+
+	// 2. Register ONLY the default provider if API key is available
+	if defaultModel != "" {
+		registerDefaultProvider(registry, defaultModel)
+	} else {
+		// Try to find a default model from available API keys
+		findAndRegisterDefaultProvider(registry)
+	}
+
+	// 3. Create tool registry and register all tools
+	toolRegistry := tool.NewRegistry()
+	registerAllTools(toolRegistry)
+
+	// 4. Create bus service for events
+	busService := bus.New(ctx, nil)
+
+	// 5. Open database for processor
+	dbPath := global.DatabasePath()
+	db, err := database.New(ctx, database.Config{Path: dbPath})
+	if err != nil {
+		log.Warn("Failed to open database for processor", "error", err.Error())
+		return registry, toolRegistry, busService, nil
+	}
+
+	// 6. Create session processor
+	processor := session.NewProcessor(session.ProcessorConfig{
+		Registry:     registry,
+		DB:           db,
+		Bus:          busService,
+		ToolRegistry: toolRegistry,
+	})
+
+	log.Info("Initialized AI components", "default_provider", defaultModel, "tools", len(toolRegistry.List()))
+
+	return registry, toolRegistry, busService, processor
+}
+
+// registerDefaultProvider registers only the provider for the default model
+func registerDefaultProvider(registry *provider.ProviderRegistry, modelID string) {
+	// Parse model ID to get provider
+	providerID, modelName := provider.ParseModelID(provider.ModelID(modelID))
+	if providerID == "" {
+		// Try to parse as just provider/model
+		providerID, modelName = parseModelString(modelID)
+	}
+
+	log.Info("Registering default provider", "provider", providerID, "model", modelName)
+
+	// Get API key for this provider
+	apiKey := getAPIKeyForProvider(providerID)
+	if apiKey == "" {
+		log.Warn("No API key found for provider", "provider", providerID)
+		return
+	}
+
+	// Register only this provider
+	switch providerID {
+	case provider.ProviderAnthropic:
+		registry.Register(provider.NewAnthropicProvider(apiKey))
+	case provider.ProviderOpenAI:
+		registry.Register(provider.NewOpenAIProvider(apiKey))
+	case provider.ProviderOpenRouter:
+		registry.Register(provider.NewOpenRouterProvider(apiKey))
+	case provider.ProviderGroq:
+		registry.Register(provider.NewGroqProvider(apiKey))
+	case provider.ProviderMistral:
+		registry.Register(provider.NewMistralProvider(apiKey))
+	case provider.ProviderTogetherAI:
+		registry.Register(provider.NewTogetherAIProvider(apiKey))
+	case provider.ProviderPerplexity:
+		registry.Register(provider.NewPerplexityProvider(apiKey))
+	case provider.ProviderXAI:
+		registry.Register(provider.NewXAIProvider(apiKey))
+	case provider.ProviderCerebras:
+		registry.Register(provider.NewCerebrasProvider(apiKey))
+	case provider.ProviderDeepInfra:
+		registry.Register(provider.NewDeepInfraProvider(apiKey))
+	default:
+		log.Warn("Unknown provider", "provider", providerID)
+	}
+}
+
+// findAndRegisterDefaultProvider finds a provider with available API key
+func findAndRegisterDefaultProvider(registry *provider.ProviderRegistry) {
+	// Priority order for default provider
+	priorityProviders := []provider.ProviderID{
+		provider.ProviderAnthropic,
+		provider.ProviderOpenAI,
+		provider.ProviderOpenRouter,
+		provider.ProviderGroq,
+	}
+
+	for _, provID := range priorityProviders {
+		apiKey := getAPIKeyForProvider(provID)
+		if apiKey != "" {
+			registerDefaultProvider(registry, string(provID))
+			return
+		}
+	}
+
+	log.Warn("No API keys found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+}
+
+// getAPIKeyForProvider returns the API key for a provider from environment
+func getAPIKeyForProvider(providerID provider.ProviderID) string {
+	switch providerID {
+	case provider.ProviderAnthropic:
+		return os.Getenv("ANTHROPIC_API_KEY")
+	case provider.ProviderOpenAI:
+		return os.Getenv("OPENAI_API_KEY")
+	case provider.ProviderOpenRouter:
+		return os.Getenv("OPENROUTER_API_KEY")
+	case provider.ProviderGroq:
+		return os.Getenv("GROQ_API_KEY")
+	case provider.ProviderMistral:
+		return os.Getenv("MISTRAL_API_KEY")
+	case provider.ProviderTogetherAI:
+		return os.Getenv("TOGETHERAI_API_KEY")
+	case provider.ProviderPerplexity:
+		return os.Getenv("PERPLEXITY_API_KEY")
+	case provider.ProviderXAI:
+		return os.Getenv("XAI_API_KEY")
+	case provider.ProviderCerebras:
+		return os.Getenv("CEREBRAS_API_KEY")
+	case provider.ProviderDeepInfra:
+		return os.Getenv("DEEPINFRA_API_KEY")
+	}
+	return ""
+}
+
+// parseModelString parses a model string like "anthropic/claude-sonnet-4-5" into provider and model
+func parseModelString(modelStr string) (provider.ProviderID, string) {
+	for i := 0; i < len(modelStr); i++ {
+		if modelStr[i] == '/' {
+			return provider.ProviderID(modelStr[:i]), modelStr[i+1:]
+		}
+	}
+	return provider.ProviderID(modelStr), modelStr
+}
+
+// registerProvidersFromEnv registers providers using API keys from environment variables
+// DEPRECATED: Use registerDefaultProvider for lazy loading instead
+func registerProvidersFromEnv(registry *provider.ProviderRegistry) {
+	// Anthropic
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		anthropic := provider.NewAnthropicProvider(apiKey)
+		registry.Register(anthropic)
+		log.Info("Registered Anthropic provider")
+	}
+
+	// OpenAI
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		openai := provider.NewOpenAIProvider(apiKey)
+		registry.Register(openai)
+		log.Info("Registered OpenAI provider")
+	}
+
+	// OpenRouter
+	if apiKey := os.Getenv("OPENROUTER_API_KEY"); apiKey != "" {
+		openrouter := provider.NewOpenRouterProvider(apiKey)
+		registry.Register(openrouter)
+		log.Info("Registered OpenRouter provider")
+	}
+
+	// Groq
+	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
+		groq := provider.NewGroqProvider(apiKey)
+		registry.Register(groq)
+		log.Info("Registered Groq provider")
+	}
+
+	// Mistral
+	if apiKey := os.Getenv("MISTRAL_API_KEY"); apiKey != "" {
+		mistral := provider.NewMistralProvider(apiKey)
+		registry.Register(mistral)
+		log.Info("Registered Mistral provider")
+	}
+
+	// TogetherAI
+	if apiKey := os.Getenv("TOGETHERAI_API_KEY"); apiKey != "" {
+		together := provider.NewTogetherAIProvider(apiKey)
+		registry.Register(together)
+		log.Info("Registered TogetherAI provider")
+	}
+
+	// Perplexity
+	if apiKey := os.Getenv("PERPLEXITY_API_KEY"); apiKey != "" {
+		perplexity := provider.NewPerplexityProvider(apiKey)
+		registry.Register(perplexity)
+		log.Info("Registered Perplexity provider")
+	}
+
+	// XAI
+	if apiKey := os.Getenv("XAI_API_KEY"); apiKey != "" {
+		xai := provider.NewXAIProvider(apiKey)
+		registry.Register(xai)
+		log.Info("Registered XAI provider")
+	}
+
+	// Cerebras
+	if apiKey := os.Getenv("CEREBRAS_API_KEY"); apiKey != "" {
+		cerebras := provider.NewCerebrasProvider(apiKey)
+		registry.Register(cerebras)
+		log.Info("Registered Cerebras provider")
+	}
+
+	// DeepInfra
+	if apiKey := os.Getenv("DEEPINFRA_API_KEY"); apiKey != "" {
+		deepinfra := provider.NewDeepInfraProvider(apiKey)
+		registry.Register(deepinfra)
+		log.Info("Registered DeepInfra provider")
+	}
+
+	// If no providers registered, show warning
+	if len(registry.ListProviders()) == 0 {
+		log.Warn("No AI providers configured. Set API keys in environment:")
+		log.Warn("  ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, etc.")
+	}
+}
+
+// registerAllTools registers all available tools
+func registerAllTools(registry *tool.Registry) {
+	registry.Register(tool.NewBashTool())
+	registry.Register(tool.NewReadTool())
+	registry.Register(tool.NewWriteTool())
+	registry.Register(tool.NewEditTool())
+	registry.Register(tool.NewGlobTool())
+	registry.Register(tool.NewGrepTool())
+	registry.Register(tool.NewWebFetchTool())
+}
+
+// subscribeTUIToBus subscribes the TUI app to bus events for real-time updates
+func subscribeTUIToBus(app *tui.App, busService *bus.Service) {
+	// Subscribe to part updates for streaming text
+	partUpdatedChan, cleanup := busService.Subscribe(session.EventPartUpdated)
+	go func() {
+		for payload := range partUpdatedChan {
+			// Extract delta text
+			props := payload.Properties.(map[string]interface{})
+			delta, ok := props["delta"].(string)
+			if !ok {
+				continue
+			}
+
+			// Send tea.Msg to update viewport
+			// Note: In a real implementation, we'd use a channel to send to tea program
+			// For now, we log the streaming event
+			log.Info("Stream delta", "delta", delta)
+		}
+		cleanup()
+	}()
+
+	// Subscribe to message completion
+	msgCompleteChan, cleanup2 := busService.Subscribe(session.EventMessageComplete)
+	go func() {
+		for payload := range msgCompleteChan {
+			props := payload.Properties.(map[string]interface{})
+			log.Info("Message complete", "message_id", props["message_id"])
+		}
+		cleanup2()
+	}()
+
+	// Subscribe to tool events
+	toolPendingChan, cleanup3 := busService.Subscribe(session.EventToolCallPending)
+	go func() {
+		for payload := range toolPendingChan {
+			props := payload.Properties.(map[string]interface{})
+			log.Info("Tool pending", "tool_name", props["tool_name"])
+		}
+		cleanup3()
+	}()
 }
