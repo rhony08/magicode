@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -301,9 +302,9 @@ func (a *App) subscribeToBus() tea.Cmd {
 	}()
 
 	// Subscribe to tool events
-	toolPendingChan, cleanupTool := a.busService.Subscribe(session.EventToolCallPending)
+	toolPendingChan, cleanupToolPending := a.busService.Subscribe(session.EventToolCallPending)
 	go func() {
-		defer cleanupTool()
+		defer cleanupToolPending()
 		for payload := range toolPendingChan {
 			props := payload.Properties.(map[string]interface{})
 			msg := StreamToolPendingMsg{
@@ -312,6 +313,46 @@ func (a *App) subscribeToBus() tea.Cmd {
 				PartID:    props["part_id"].(string),
 				ToolName:  props["tool_name"].(string),
 				ToolID:    props["tool_id"].(string),
+			}
+			if input, ok := props["input"].(map[string]interface{}); ok {
+				// Convert input to JSON string for display
+				inputJSON, _ := json.Marshal(input)
+				msg.Input = string(inputJSON)
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to tool running events
+	toolRunningChan, cleanupToolRunning := a.busService.Subscribe(session.EventToolCallRunning)
+	go func() {
+		defer cleanupToolRunning()
+		for payload := range toolRunningChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamToolRunningMsg{
+				SessionID: props["session_id"].(string),
+				ToolName:  props["tool_name"].(string),
+				ToolID:    props["tool_id"].(string),
+			}
+			a.eventChan <- msg
+		}
+	}()
+
+	// Subscribe to tool complete events
+	toolCompleteChan, cleanupToolComplete := a.busService.Subscribe(session.EventToolCallComplete)
+	go func() {
+		defer cleanupToolComplete()
+		for payload := range toolCompleteChan {
+			props := payload.Properties.(map[string]interface{})
+			msg := StreamToolCompleteMsg{
+				SessionID: props["session_id"].(string),
+				ToolName:  props["tool_name"].(string),
+				ToolID:    props["tool_id"].(string),
+				Result:    props["result"].(string),
+				IsError:   props["is_error"].(bool),
+			}
+			if resultPart, ok := props["result_part"].(*database.Part); ok {
+				msg.ResultPartID = resultPart.ID
 			}
 			a.eventChan <- msg
 		}

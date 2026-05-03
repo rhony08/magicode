@@ -366,13 +366,22 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			delete(activeParts, e.Index)
 			mu.Unlock()
 
-			if exists && p.bus != nil {
-				p.bus.Publish(EventPartComplete, map[string]interface{}{
-					"session_id": sessionID,
-					"message_id": messageID,
-					"part_id":    part.ID,
-					"index":      e.Index,
-				})
+			if exists {
+				// Publish part complete event
+				if p.bus != nil {
+					p.bus.Publish(EventPartComplete, map[string]interface{}{
+						"session_id": sessionID,
+						"message_id": messageID,
+						"part_id":    part.ID,
+						"index":      e.Index,
+						"type":       part.Data.Type,
+					})
+				}
+
+				// If this is a tool_use part, execute the tool
+				if part.Data.Type == "tool_use" {
+					p.executeToolFromPart(ctx, sessionID, messageID, part)
+				}
 			}
 
 		case provider.MessageStopEvent:
@@ -567,4 +576,108 @@ func (p *Processor) ExecuteTool(ctx context.Context, toolName string, input map[
 	}
 
 	return p.toolRegistry.Execute(tool.ToolID(toolName), toolCtx, input)
+}
+
+// executeToolFromPart executes a tool from a tool_use part and creates a tool_result part
+func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageID string, toolUsePart *database.Part) {
+	toolName := toolUsePart.Data.ToolName
+	toolID := toolUsePart.Data.ToolID
+
+	// Publish tool pending event
+	if p.bus != nil {
+		p.bus.Publish(EventToolCallPending, map[string]interface{}{
+			"session_id": sessionID,
+			"message_id": messageID,
+			"part_id":    toolUsePart.ID,
+			"tool_name":  toolName,
+			"tool_id":    toolID,
+			"input":      toolUsePart.Data.ToolInput,
+		})
+	}
+
+	// Build tool context
+	toolCtx := tool.ToolContext{
+		SessionID: sessionID,
+		MessageID: messageID,
+		CallID:    toolID,
+		Abort:     ctx,
+	}
+
+	// Convert input to proper format
+	input := toolUsePart.Data.ToolInput
+	if input == nil {
+		input = make(map[string]interface{})
+	}
+
+	// Publish tool running event
+	if p.bus != nil {
+		p.bus.Publish(EventToolCallRunning, map[string]interface{}{
+			"session_id": sessionID,
+			"message_id": messageID,
+			"tool_name":  toolName,
+			"tool_id":    toolID,
+		})
+	}
+
+	// Execute the tool
+	result, err := p.ExecuteTool(ctx, toolName, input, toolCtx)
+
+	// Create tool_result part
+	resultPart := database.Part{
+		MessageID: messageID,
+		SessionID: sessionID,
+		Data: database.PartData{
+			Type:     "tool_result",
+			ToolID:   toolID,
+			ToolName: toolName,
+		},
+	}
+
+	if err != nil {
+		// Tool execution failed
+		resultPart.Data.Status = "error"
+		resultPart.Data.ToolResult = err.Error()
+		resultPart.Data.Error = err.Error()
+
+		p.logger.Error("Tool execution failed", map[string]interface{}{
+			"tool_name": toolName,
+			"error":     err.Error(),
+		})
+	} else {
+		// Tool execution succeeded
+		resultPart.Data.Status = "complete"
+		resultPart.Data.ToolResult = result.Output
+	}
+
+	// Save tool_result part to database
+	createdResultPart, dbErr := p.parts.Create(ctx, resultPart)
+	if dbErr != nil {
+		p.logger.Error("Failed to create tool_result part", map[string]interface{}{
+			"error": dbErr.Error(),
+		})
+		createdResultPart = &resultPart
+	}
+
+	// Update tool_use part status
+	if err != nil {
+		toolUsePart.Data.Status = "error"
+	} else {
+		toolUsePart.Data.Status = "complete"
+	}
+	p.parts.Update(ctx, *toolUsePart)
+
+	// Publish tool complete event
+	if p.bus != nil {
+		p.bus.Publish(EventToolCallComplete, map[string]interface{}{
+			"session_id":  sessionID,
+			"message_id":  messageID,
+			"part_id":     createdResultPart.ID,
+			"tool_name":   toolName,
+			"tool_id":     toolID,
+			"result":      resultPart.Data.ToolResult,
+			"status":      resultPart.Data.Status,
+			"is_error":    err != nil,
+			"result_part": createdResultPart,
+		})
+	}
 }

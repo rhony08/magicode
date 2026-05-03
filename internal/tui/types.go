@@ -186,11 +186,12 @@ type (
 
 	// StreamToolCompleteMsg is sent when tool execution finishes
 	StreamToolCompleteMsg struct {
-		SessionID string
-		ToolID    string
-		ToolName  string
-		Result    string
-		IsError   bool
+		SessionID    string
+		ToolID       string
+		ToolName     string
+		Result       string
+		IsError      bool
+		ResultPartID string // ID of the tool_result part created
 	}
 
 	// StreamErrorMsg is sent when an error occurs during streaming
