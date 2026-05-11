@@ -197,6 +197,7 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 	}
 
 	// 5. Multi-turn loop: stream, execute tools, continue if needed
+	// OpenCode pattern: Reload messages from DB each iteration to ensure consistency
 	currentMessageID := assistantMsg.ID
 	maxIterations := 20 // Prevent infinite loops
 	iteration := 0
@@ -212,6 +213,21 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 				"iterations": iteration,
 			})
 			break
+		}
+
+		// Reload messages from DB on subsequent iterations (OpenCode pattern)
+		// This ensures consistency with DB state after tool execution
+		// Skip messages created by tools or compacted messages
+		if iteration > 0 {
+			// Exclude the current incomplete assistant message (being streamed)
+			// It will be included after streaming completes
+			contentMessages = p.buildContentMessagesFromDB(processCtx, req.SessionID)
+			
+			p.logger.Info("Reloaded messages from DB for iteration", map[string]interface{}{
+				"session_id":    req.SessionID,
+				"iteration":     iteration,
+				"message_count": len(contentMessages),
+			})
 		}
 
 		// Build chat request for this turn
@@ -335,29 +351,29 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 				"iteration":    iteration + 1,
 			})
 
-			// Build assistant message content from parts
-			assistantContent := p.buildAssistantContent(req.SessionID, currentMessageID)
+			// Create user message to hold tool results (Anthropic API requirement)
+			// Tool results must be in a user message, not attached to assistant
+			// This message will be picked up when reloading from DB
+			toolResultMsg, err := p.createToolResultUserMessage(processCtx, req.SessionID, result.ToolResults)
+			if err != nil {
+				return fmt.Errorf("failed to create tool result user message: %w", err)
+			}
 
-			// Add assistant message to conversation
-			contentMessages = append(contentMessages, provider.ContentMessage{
-				Role:    provider.RoleAssistant,
-				Content: assistantContent,
+			p.logger.Info("Created tool result user message", map[string]interface{}{
+				"session_id":   req.SessionID,
+				"message_id":   toolResultMsg.ID,
+				"tool_count":   len(result.ToolResults),
 			})
 
-			// Combine ALL tool results into ONE user message (Anthropic requirement)
-			toolResultParts := []provider.ContentPart{}
-			for _, tr := range result.ToolResults {
-				toolResultParts = append(toolResultParts, provider.ToolResultPart{
-					Type:      "tool_result",
-					ToolUseID: tr.ToolID,
-					Content:   tr.Result,
-					IsError:   tr.IsError,
+			// Publish tool result message created event
+			if p.bus != nil {
+				p.bus.Publish(EventMessageCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": toolResultMsg.ID,
+					"role":       "user",
+					"type":       "tool_results",
 				})
 			}
-			contentMessages = append(contentMessages, provider.ContentMessage{
-				Role:    provider.RoleUser,
-				Content: toolResultParts,
-			})
 
 			// Create new assistant message for next turn
 			newAssistantMsg, err := p.createAssistantMessage(processCtx, req)
@@ -483,6 +499,66 @@ func (p *Processor) createAssistantMessage(ctx context.Context, req ProcessReque
 	msg.Data.ProviderID = string(providerID)
 
 	return p.messages.Create(ctx, msg)
+}
+
+// createToolResultUserMessage creates a user message containing tool results
+// This is required for Anthropic API - tool results must be in a user message
+func (p *Processor) createToolResultUserMessage(ctx context.Context, sessionID string, toolResults []ToolResult) (*database.Message, error) {
+	msg := database.Message{
+		SessionID: sessionID,
+		Data: database.MessageInfo{
+			Role: "user",
+			// No agent/model for tool result messages
+		},
+	}
+
+	// Create message in DB
+	createdMsg, err := p.messages.Create(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create tool_result parts for each result
+	for _, tr := range toolResults {
+		part := database.Part{
+			MessageID: createdMsg.ID,
+			SessionID: sessionID,
+			Data: database.PartData{
+				Type:       "tool_result",
+				ToolID:     tr.ToolID,
+				ToolName:   tr.ToolName,
+				ToolResult: tr.Result,
+				Status:     "complete",
+			},
+		}
+
+		if tr.IsError {
+			part.Data.Status = "error"
+			part.Data.Error = tr.Result
+		}
+
+		if tr.Blocked {
+			part.Data.Status = "blocked"
+		}
+
+		_, err := p.parts.Create(ctx, part)
+		if err != nil {
+			p.logger.Error("Failed to create tool_result part", map[string]interface{}{
+				"error":    err.Error(),
+				"tool_id":  tr.ToolID,
+				"tool_name": tr.ToolName,
+			})
+			// Continue creating other parts
+		}
+	}
+
+	p.logger.Info("Created tool result user message with parts", map[string]interface{}{
+		"session_id":  sessionID,
+		"message_id":  createdMsg.ID,
+		"part_count":  len(toolResults),
+	})
+
+	return createdMsg, nil
 }
 
 // buildChatRequest builds a provider chat request from the process request
@@ -1089,6 +1165,8 @@ func (p *Processor) buildAssistantContent(sessionID, messageID string) []provide
 }
 
 // convertDatabaseMessageToContentMessage converts a database message to ContentMessage format
+// For assistant messages, tool_result parts are skipped (they're for UI display only)
+// For user messages, tool_result parts are included (API expects them in user messages)
 func (p *Processor) convertDatabaseMessageToContentMessage(dbMsg database.Message) provider.ContentMessage {
 	msg := provider.ContentMessage{
 		Role: provider.Role(dbMsg.Data.Role),
@@ -1107,19 +1185,26 @@ func (p *Processor) convertDatabaseMessageToContentMessage(dbMsg database.Messag
 					Text: part.Data.Text,
 				})
 			case "tool_use":
-				content = append(content, provider.ToolUsePart{
-					Type:  "tool_use",
-					ID:    part.Data.ToolID,
-					Name:  part.Data.ToolName,
-					Input: part.Data.ToolInput,
-				})
+				// Only include tool_use in assistant messages (not in user messages)
+				if dbMsg.Data.Role == "assistant" {
+					content = append(content, provider.ToolUsePart{
+						Type:  "tool_use",
+						ID:    part.Data.ToolID,
+						Name:  part.Data.ToolName,
+						Input: part.Data.ToolInput,
+					})
+				}
 			case "tool_result":
-				content = append(content, provider.ToolResultPart{
-					Type:      "tool_result",
-					ToolUseID: part.Data.ToolID,
-					Content:   part.Data.ToolResult,
-					IsError:   part.Data.Status == "error",
-				})
+				// Only include tool_result in user messages (API requirement)
+				// Skip tool_result in assistant messages (they're for UI display only)
+				if dbMsg.Data.Role == "user" {
+					content = append(content, provider.ToolResultPart{
+						Type:      "tool_result",
+						ToolUseID: part.Data.ToolID,
+						Content:   part.Data.ToolResult,
+						IsError:   part.Data.Status == "error",
+					})
+				}
 			}
 		}
 	}
@@ -1134,4 +1219,51 @@ func (p *Processor) convertDatabaseMessageToContentMessage(dbMsg database.Messag
 
 	msg.Content = content
 	return msg
+}
+
+// buildContentMessagesFromDB reloads messages from database and builds ContentMessages
+// This is called at the start of each iteration to ensure consistency with DB state
+// Matches OpenCode's pattern of reloading messages from DB each iteration
+func (p *Processor) buildContentMessagesFromDB(ctx context.Context, sessionID string, excludeMessageIDs ...string) []provider.ContentMessage {
+	// List all messages for this session
+	dbMessages, err := p.messages.List(ctx, sessionID)
+	if err != nil {
+		p.logger.Error("Failed to list messages from DB", map[string]interface{}{
+			"session_id": sessionID,
+			"error":      err.Error(),
+		})
+		return []provider.ContentMessage{}
+	}
+
+	// Build exclusion set
+	excludeSet := make(map[string]bool)
+	for _, id := range excludeMessageIDs {
+		excludeSet[id] = true
+	}
+
+	messages := []provider.ContentMessage{}
+	for _, dbMsg := range dbMessages {
+		// Skip excluded messages (e.g., current incomplete assistant message)
+		if excludeSet[dbMsg.ID] {
+			continue
+		}
+
+		// Skip compacted messages (if marked)
+		if dbMsg.Data.Compacted {
+			continue
+		}
+
+		// Convert to ContentMessage
+		msg := p.convertDatabaseMessageToContentMessage(dbMsg)
+		messages = append(messages, msg)
+	}
+
+	p.logger.Info("Reloaded messages from DB", map[string]interface{}{
+		"session_id":       sessionID,
+		"message_count":    len(messages),
+		"excluded_count":   len(excludeMessageIDs),
+		"total_db_messages": len(dbMessages),
+	})
+
+	return messages
 }

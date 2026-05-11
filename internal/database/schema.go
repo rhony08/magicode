@@ -122,6 +122,7 @@ type MessageInfo struct {
 	Finish     string                 `json:"finish"`     // Optional (tool-calls, end, etc.)
 	Path       map[string]interface{} `json:"path"`       // Optional object with cwd/root
 	Summary    map[string]interface{} `json:"summary"`    // Optional
+	Compacted  bool                   `json:"compacted"`  // Whether message was compacted (summarized)
 }
 
 // ===========================================
