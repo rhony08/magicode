@@ -615,10 +615,12 @@ func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID
 		ToolResults: []ToolResult{},
 	}
 
-	// Track active parts by index
+	// Track active parts by index (for content blocks)
 	activeParts := make(map[int]*database.Part)
 	// Track tool_use parts that need execution
 	toolUseParts := make(map[int]*database.Part)
+	// Track reasoning blocks by ID (for reasoning events)
+	reasoningParts := make(map[string]*database.Part)
 	var mu sync.Mutex
 
 	for event := range events {
@@ -635,6 +637,86 @@ func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID
 		switch e := event.(type) {
 		case provider.MessageStartEvent:
 			// Message started - nothing to do, already created
+
+		case provider.ReasoningStartEvent:
+			// Reasoning/thinking block started
+			mu.Lock()
+			if _, exists := reasoningParts[e.ID]; !exists {
+				part := database.Part{
+					MessageID: messageID,
+					SessionID: sessionID,
+					Data: database.PartData{
+						Type:             "reasoning",
+						Text:             "",
+						ReasoningMetadata: e.Metadata,
+						ReasoningTime:     &database.ReasoningTime{Start: time.Now().UnixMilli()},
+					},
+				}
+				createdPart, err := p.parts.Create(ctx, part)
+				if err == nil {
+					reasoningParts[e.ID] = createdPart
+				} else {
+					reasoningParts[e.ID] = &part
+				}
+			}
+			mu.Unlock()
+
+			p.logger.Info("Reasoning block started", map[string]interface{}{
+				"session_id": sessionID,
+				"message_id": messageID,
+				"reasoning_id": e.ID,
+			})
+
+		case provider.ReasoningDeltaEvent:
+			mu.Lock()
+			part, exists := reasoningParts[e.ID]
+			mu.Unlock()
+
+			if exists {
+				// Append delta text
+				part.Data.Text += e.Text
+				if e.Metadata != nil {
+					part.Data.ReasoningMetadata = e.Metadata
+				}
+				p.parts.Update(ctx, *part)
+
+				// Publish part updated event
+				if p.bus != nil {
+					p.bus.Publish(EventPartUpdated, map[string]interface{}{
+						"session_id": sessionID,
+						"message_id": messageID,
+						"part_id":    part.ID,
+						"delta":      e.Text,
+						"delta_type": "reasoning",
+					})
+				}
+			}
+
+		case provider.ReasoningEndEvent:
+			mu.Lock()
+			part, exists := reasoningParts[e.ID]
+			delete(reasoningParts, e.ID)
+			mu.Unlock()
+
+			if exists {
+				// Finalize reasoning block
+				part.Data.ReasoningTime.End = time.Now().UnixMilli()
+				if e.Metadata != nil {
+					part.Data.ReasoningMetadata = e.Metadata
+				}
+				p.parts.Update(ctx, *part)
+
+				// Publish part complete event
+				if p.bus != nil {
+					p.bus.Publish(EventPartComplete, map[string]interface{}{
+						"session_id": sessionID,
+						"message_id": messageID,
+						"part_id":    part.ID,
+						"type":       "reasoning",
+						"duration_ms": part.Data.ReasoningTime.End - part.Data.ReasoningTime.Start,
+					})
+				}
+			}
 
 		case provider.ContentBlockStartEvent:
 			mu.Lock()
@@ -777,6 +859,13 @@ func (p *Processor) createPartFromContentBlock(sessionID, messageID string, even
 		part.Data.Type = "text"
 		part.Data.Text = content.Text
 
+	case provider.ReasoningPart:
+		// Handle reasoning/thinking blocks from content_block_start
+		part.Data.Type = "reasoning"
+		part.Data.Text = content.Text
+		part.Data.ReasoningMetadata = content.Metadata
+		part.Data.ReasoningTime = &database.ReasoningTime{Start: time.Now().UnixMilli()}
+
 	case provider.ToolUsePart:
 		part.Data.Type = "tool_use"
 		part.Data.ToolID = content.ID
@@ -808,6 +897,21 @@ func (p *Processor) updatePartWithDelta(ctx context.Context, part *database.Part
 		err := p.parts.Update(ctx, *part)
 		if err != nil {
 			p.logger.Error("Failed to update part", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+
+	case provider.ReasoningPart:
+		// Append reasoning text to existing content
+		part.Data.Text += delta.Text
+		if delta.Metadata != nil {
+			part.Data.ReasoningMetadata = delta.Metadata
+		}
+
+		// Update in database
+		err := p.parts.Update(ctx, *part)
+		if err != nil {
+			p.logger.Error("Failed to update reasoning part", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}

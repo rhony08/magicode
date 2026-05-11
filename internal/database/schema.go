@@ -145,16 +145,38 @@ type PartData struct {
 	Type       string                 `json:"type"`       // text, reasoning, file, tool_use, tool_result, step-start, etc.
 	Text       string                 `json:"text"`       // For text/reasoning parts
 	Synthetic  bool                   `json:"synthetic"`  // Optional flag for synthetic parts
+	
+	// Reasoning-specific fields (for thinking blocks)
+	ReasoningMetadata map[string]interface{} `json:"reasoning_metadata,omitempty"` // Provider metadata for reasoning
+	ReasoningTime     *ReasoningTime         `json:"reasoning_time,omitempty"`     // Time tracking for reasoning
+	
+	// File-specific fields
 	Mime       string                 `json:"mime"`       // For file parts
 	Filename   string                 `json:"filename"`   // For file parts
 	URL        string                 `json:"url"`        // For file parts
 	Source     map[string]interface{} `json:"source"`     // For file parts
+	
+	// Tool-specific fields
 	ToolID     string                 `json:"toolID"`     // For tool parts
 	ToolName   string                 `json:"toolName"`   // For tool parts
 	ToolInput  map[string]any         `json:"toolInput"`  // For tool_use
 	ToolResult string                 `json:"toolResult"` // For tool_result
-	Status     string                 `json:"status"`     // pending, running, success, error
+	Status     string                 `json:"status"`     // pending, running, success, error, blocked
 	Error      string                 `json:"error"`      // For error status
+	
+	// Step-specific fields
+	SnapshotID string                 `json:"snapshot_id,omitempty"` // For step-start/step-finish
+	StepReason string                 `json:"step_reason,omitempty"` // For step-finish
+	
+	// Compaction-specific fields
+	CompactionAuto    bool   `json:"compaction_auto,omitempty"`    // Whether auto-compaction
+	CompactionTailID  string `json:"compaction_tail_id,omitempty"` // Tail start ID
+}
+
+// ReasoningTime tracks timing for reasoning/thinking blocks
+type ReasoningTime struct {
+	Start int64 `json:"start"`           // Start timestamp (ms)
+	End   int64 `json:"end,omitempty"`   // End timestamp (ms)
 }
 
 // ===========================================

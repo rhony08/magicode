@@ -76,6 +76,16 @@ type TextPart struct {
 
 func (p TextPart) ContentType() string { return "text" }
 
+// ReasoningPart is a reasoning/thinking content part
+// Used by Claude (Anthropic) for extended thinking blocks
+type ReasoningPart struct {
+	Type     string                 `json:"type"` // always "reasoning"
+	Text     string                 `json:"text"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
+func (p ReasoningPart) ContentType() string { return "reasoning" }
+
 // ToolUsePart is a tool use content part
 type ToolUsePart struct {
 	Type  string                 `json:"type"` // always "tool_use"
@@ -222,6 +232,54 @@ type ErrorEvent struct {
 }
 
 func (e ErrorEvent) EventType() string { return "error" }
+
+// ReasoningStartEvent marks the start of a reasoning/thinking block
+// Used by Claude (Anthropic) for extended thinking
+type ReasoningStartEvent struct {
+	Type     string                 `json:"type"` // "reasoning_start"
+	ID       string                 `json:"id"`   // Unique ID for this reasoning block
+	Metadata map[string]interface{} `json:"metadata,omitempty"` // Provider metadata
+}
+
+func (e ReasoningStartEvent) EventType() string { return "reasoning_start" }
+
+// ReasoningDeltaEvent contains a delta for reasoning text
+type ReasoningDeltaEvent struct {
+	Type     string                 `json:"type"` // "reasoning_delta"
+	ID       string                 `json:"id"`   // ID of the reasoning block
+	Text     string                 `json:"text"` // Delta text
+	Metadata map[string]interface{} `json:"metadata,omitempty"` // Provider metadata
+}
+
+func (e ReasoningDeltaEvent) EventType() string { return "reasoning_delta" }
+
+// ReasoningEndEvent marks the end of a reasoning/thinking block
+type ReasoningEndEvent struct {
+	Type     string                 `json:"type"` // "reasoning_end"
+	ID       string                 `json:"id"`   // ID of the reasoning block
+	Metadata map[string]interface{} `json:"metadata,omitempty"` // Provider metadata
+}
+
+func (e ReasoningEndEvent) EventType() string { return "reasoning_end" }
+
+// StepStartEvent marks the start of a processing step
+// Used for multi-step reasoning and progress tracking
+type StepStartEvent struct {
+	Type       string `json:"type"` // "step_start"
+	SnapshotID string `json:"snapshot_id,omitempty"` // File system snapshot ID
+}
+
+func (e StepStartEvent) EventType() string { return "step_start" }
+
+// StepFinishEvent marks the end of a processing step
+type StepFinishEvent struct {
+	Type     string    `json:"type"` // "step_finish"
+	Tokens   Usage     `json:"tokens,omitempty"`
+	Cost     float64   `json:"cost,omitempty"`
+	Reason   string    `json:"reason,omitempty"` // Reason for step completion
+}
+
+func (e StepFinishEvent) EventType() string { return "step_finish" }
 
 // Cost represents the cost of using a model
 type Cost struct {
