@@ -3,6 +3,9 @@ package tool
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 // ToolID is a unique identifier for a tool
@@ -134,4 +137,32 @@ func NewPermissionError(toolID ToolID, message string) *ToolError {
 // NewTimeoutError creates a timeout error
 func NewTimeoutError(toolID ToolID, message string) *ToolError {
 	return NewToolError(toolID, "timeout", message)
+}
+
+// ValidatePath validates that a file path stays within the working directory
+// This prevents path traversal attacks (e.g., ../../../etc/passwd)
+func ValidatePath(filePath, workDir string) error {
+	// Clean and get absolute paths
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+
+	// If workDir is not set, allow the path (for backward compatibility)
+	if workDir == "" {
+		return nil
+	}
+
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return fmt.Errorf("invalid working directory: %w", err)
+	}
+
+	// Ensure the path is within the working directory
+	// Add trailing separator to prevent partial matches
+	if !strings.HasPrefix(absPath, absWorkDir+string(filepath.Separator)) && absPath != absWorkDir {
+		return fmt.Errorf("path %s is outside working directory %s", absPath, absWorkDir)
+	}
+
+	return nil
 }

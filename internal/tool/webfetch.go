@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -97,6 +99,11 @@ func (t *WebFetchTool) Validate(params map[string]interface{}) error {
 func (t *WebFetchTool) Execute(ctx context.Context, params map[string]interface{}, toolCtx ToolContext) (*ToolResult, error) {
 	url := params["url"].(string)
 
+	// Security check: Validate URL is safe (SSRF protection)
+	if err := validateURL(url); err != nil {
+		return nil, NewValidationError(ToolWebFetch, err.Error())
+	}
+
 	// Get format
 	format := "markdown"
 	if f, ok := params["format"].(string); ok {
@@ -166,6 +173,70 @@ func (t *WebFetchTool) Execute(ctx context.Context, params map[string]interface{
 			RowsAffected: len(body),
 		},
 	}, nil
+}
+
+// isInternalIP checks if an IP address is internal/private
+func isInternalIP(ip net.IP) bool {
+	// Check private IP ranges
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return true
+	}
+	return false
+}
+
+// isBlockedHost checks if a hostname is blocked (internal networks, metadata)
+func isBlockedHost(hostname string) bool {
+	// Block localhost variations
+	if hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" {
+		return true
+	}
+
+	// Block cloud metadata endpoints
+	blockedHosts := []string{
+		"169.254.169.254", // AWS, GCP, Azure metadata
+		"metadata.google.internal",
+		"metadata.azure.internal",
+		"169.254.170.2",   // AWS ECS
+		"192.0.0.1",       // AWS EC2
+	}
+
+	for _, blocked := range blockedHosts {
+		if hostname == blocked {
+			return true
+		}
+	}
+
+	// Check if hostname resolves to internal IP
+	ips, err := net.LookupIP(hostname)
+	if err == nil {
+		for _, ip := range ips {
+			if isInternalIP(ip) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// validateURL checks if a URL is safe to fetch (SSRF protection)
+func validateURL(urlStr string) error {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Only allow http and https
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("only http and https URLs are allowed")
+	}
+
+	// Check if host is blocked
+	if isBlockedHost(parsedURL.Hostname()) {
+		return fmt.Errorf("access to internal addresses is not allowed")
+	}
+
+	return nil
 }
 
 // convertFormat converts content to the requested format

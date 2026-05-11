@@ -101,6 +101,11 @@ func (t *ReadTool) Execute(ctx context.Context, params map[string]interface{}, t
 		filePath = filepath.Join(toolCtx.WorkDir, filePath)
 	}
 
+	// Security check: Validate path is within working directory
+	if err := ValidatePath(filePath, toolCtx.WorkDir); err != nil {
+		return nil, NewPermissionError(ToolRead, err.Error())
+	}
+
 	// Get offset and limit
 	offset := 1
 	if o, ok := params["offset"]; ok {

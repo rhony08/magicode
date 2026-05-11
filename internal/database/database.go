@@ -91,8 +91,8 @@ func (d *Database) DB() *sql.DB {
 
 // Exec executes a query without returning rows
 func (d *Database) Exec(ctx context.Context, query string, args ...any) error {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	_, err := d.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -124,8 +124,8 @@ func (d *Database) QueryRow(ctx context.Context, query string, args ...any) *sql
 
 // BeginTx starts a new transaction
 func (d *Database) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	tx, err := d.db.BeginTx(ctx, opts)
 	if err != nil {
@@ -136,8 +136,8 @@ func (d *Database) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, e
 
 // InTransaction executes a function within a transaction
 func (d *Database) InTransaction(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {

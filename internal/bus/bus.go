@@ -154,11 +154,12 @@ func (s *Service) Subscribe(def Definition) (<-chan Payload, func()) {
 
 	// Check max subscribers
 	if len(s.subscribers[def.Type]) >= s.maxSubs {
-		// Evict oldest subscriber
+		// Evict oldest subscriber safely
 		if len(s.subscribers[def.Type]) > 0 {
 			oldest := s.subscribers[def.Type][0]
-			close(oldest)
 			s.subscribers[def.Type] = s.subscribers[def.Type][1:]
+			// Close channel after removing from list to prevent sends to closed channel
+			close(oldest)
 		}
 	}
 
@@ -189,8 +190,9 @@ func (s *Service) SubscribeAll() (<-chan Payload, func()) {
 	// Check max wildcard subscribers
 	if len(s.wildcard) >= s.maxSubs {
 		oldest := s.wildcard[0]
-		close(oldest)
 		s.wildcard = s.wildcard[1:]
+		// Close channel after removing from list to prevent sends to closed channel
+		close(oldest)
 	}
 
 	ch := make(chan Payload, SubscriberBufferSize)

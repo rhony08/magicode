@@ -93,6 +93,11 @@ func (t *BashTool) Execute(ctx context.Context, params map[string]interface{}, t
 	command := params["command"].(string)
 	description := params["description"].(string)
 
+	// Security check: Validate command is not dangerous
+	if IsDangerousCommand(command) {
+		return nil, NewExecutionError(ToolBash, "command contains potentially dangerous operations and is not allowed")
+	}
+
 	// Get timeout
 	timeout := bashDefaultTimeout
 	if t, ok := params["timeout"]; ok {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/rhony08/magicode/internal/tui/types"
@@ -387,6 +388,7 @@ var DefaultThemes = map[string]Theme{
 type ThemeRegistry struct {
 	themes    map[string]Theme
 	customDir string // Directory for custom themes
+	mu        sync.RWMutex
 }
 
 // NewThemeRegistry creates a new theme registry with built-in themes
@@ -398,17 +400,23 @@ func NewThemeRegistry() *ThemeRegistry {
 
 // SetCustomDir sets the directory for custom theme files
 func (r *ThemeRegistry) SetCustomDir(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.customDir = dir
 }
 
 // Get retrieves a theme by ID
 func (r *ThemeRegistry) Get(id string) (Theme, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	theme, ok := r.themes[id]
 	return theme, ok
 }
 
 // List returns all available theme IDs
 func (r *ThemeRegistry) List() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0, len(r.themes))
 	for id := range r.themes {
 		ids = append(ids, id)
@@ -418,6 +426,8 @@ func (r *ThemeRegistry) List() []string {
 
 // ListWithNames returns all themes with their names
 func (r *ThemeRegistry) ListWithNames() []struct{ ID, Name string } {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	result := make([]struct{ ID, Name string }, 0, len(r.themes))
 	for id, theme := range r.themes {
 		result = append(result, struct{ ID, Name string }{ID: id, Name: theme.Name})
@@ -427,6 +437,9 @@ func (r *ThemeRegistry) ListWithNames() []struct{ ID, Name string } {
 
 // LoadCustom loads custom themes from JSON files in the custom directory
 func (r *ThemeRegistry) LoadCustom() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.customDir == "" {
 		return nil
 	}
@@ -633,11 +646,24 @@ func GetTheme(id string) Theme {
 
 // GetAllThemes returns all available themes from the global registry
 func GetAllThemes() map[string]Theme {
-	return globalThemeRegistry.themes
+	return globalThemeRegistry.GetThemesCopy()
+}
+
+// GetThemesCopy returns a copy of all themes (thread-safe)
+func (r *ThemeRegistry) GetThemesCopy() map[string]Theme {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	themes := make(map[string]Theme, len(r.themes))
+	for k, v := range r.themes {
+		themes[k] = v
+	}
+	return themes
 }
 
 // ListThemes returns all themes as a slice
 func (r *ThemeRegistry) ListThemes() []Theme {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	themes := make([]Theme, 0, len(r.themes))
 	for _, theme := range r.themes {
 		themes = append(themes, theme)
