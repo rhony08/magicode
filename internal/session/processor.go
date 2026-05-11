@@ -9,6 +9,7 @@ import (
 
 	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
+	"github.com/rhony08/magicode/internal/permission"
 	"github.com/rhony08/magicode/internal/provider"
 	"github.com/rhony08/magicode/internal/tool"
 	"github.com/rhony08/magicode/internal/util/log"
@@ -79,6 +80,7 @@ type Processor struct {
 	parts           *database.PartStorage
 	toolRegistry    *tool.Registry // Tool execution registry
 	compaction      *CompactionService // Token overflow compaction
+	permission      *permission.Service // Permission handling
 	mu              sync.Mutex
 	active          map[string]context.CancelFunc // Active processing contexts by session ID
 	logger          *log.Logger
@@ -91,6 +93,7 @@ type ProcessorConfig struct {
 	Bus             *bus.Service
 	ToolRegistry    *tool.Registry // Tool registry for execution
 	CompactionConfig CompactionConfig // Compaction settings
+	Permission      *permission.Service // Permission service
 	Logger          *log.Logger
 }
 
@@ -115,6 +118,7 @@ func NewProcessor(config ProcessorConfig) *Processor {
 		parts:        database.NewPartStorage(config.DB),
 		toolRegistry: config.ToolRegistry,
 		compaction:   compactionService,
+		permission:   config.Permission,
 		active:       make(map[string]context.CancelFunc),
 		logger:       config.Logger,
 	}
