@@ -67,6 +67,11 @@ func (t *WriteTool) Execute(ctx context.Context, params map[string]interface{}, 
 	filePath := params["filePath"].(string)
 	content := params["content"].(string)
 
+	// Security check: Validate path is within working directory
+	if err := ValidatePath(filePath, toolCtx.WorkDir); err != nil {
+		return nil, NewPermissionError(ToolWrite, err.Error())
+	}
+
 	// Verify parent directory exists
 	parentDir := filepath.Dir(filePath)
 	if _, err := os.Stat(parentDir); os.IsNotExist(err) {

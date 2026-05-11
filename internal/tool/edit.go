@@ -89,6 +89,11 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]interface{}, t
 	oldString := params["oldString"].(string)
 	newString := params["newString"].(string)
 
+	// Security check: Validate path is within working directory
+	if err := ValidatePath(filePath, toolCtx.WorkDir); err != nil {
+		return nil, NewPermissionError(ToolEdit, err.Error())
+	}
+
 	replaceAll := false
 	if r, ok := params["replaceAll"].(bool); ok {
 		replaceAll = r

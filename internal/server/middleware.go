@@ -1,7 +1,10 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -107,21 +110,63 @@ func generateRequestID() string {
 	return fmt.Sprintf("req-%d-%s", time.Now().UnixNano(), randomString(8))
 }
 
-// randomString generates a random string of given length.
+// randomString generates a cryptographically secure random string of given length.
 func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+	bytes := make([]byte, n)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to time-based if crypto fails (shouldn't happen)
+		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+		}
+		return string(b)
 	}
-	return string(b)
+	return hex.EncodeToString(bytes)[:n]
 }
 
 // authMiddleware creates an authentication middleware.
 func authMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// For now, skip authentication
-		// In production, this would check for API keys or tokens
+		// Get API key from environment
+		apiKey := os.Getenv("MAGICODE_API_KEY")
+		
+		// If no API key is configured, allow all requests (development mode)
+		if apiKey == "" {
+			return c.Next()
+		}
+		
+		// Check Authorization header
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   true,
+				"message": "Authorization header required",
+				"code":    fiber.StatusUnauthorized,
+			})
+		}
+		
+		// Extract token from "Bearer <token>" format
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   true,
+				"message": "Invalid authorization format. Use: Bearer <token>",
+				"code":    fiber.StatusUnauthorized,
+			})
+		}
+		
+		token := parts[1]
+		
+		// Validate token
+		if token != apiKey {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   true,
+				"message": "Invalid API key",
+				"code":    fiber.StatusUnauthorized,
+			})
+		}
+		
 		return c.Next()
 	}
 }

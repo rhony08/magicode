@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -60,6 +61,10 @@ type App struct {
 
 	// Bus service reference (for cleanup)
 	busService *bus.Service
+
+	// Context for goroutine lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// Streaming state - tracks current streaming message and parts
 	streamingState streamingState
@@ -125,6 +130,43 @@ type streamingState struct {
 	messageID string        // Message being streamed
 	parts     map[int]*Part // Parts by index (for delta appending)
 	isActive  bool          // Whether streaming is active
+	mu        sync.RWMutex  // Protects parts map from concurrent access
+}
+
+// GetPart safely retrieves a part by index
+func (s *streamingState) GetPart(index int) (*Part, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	part, exists := s.parts[index]
+	return part, exists
+}
+
+// SetPart safely sets a part by index
+func (s *streamingState) SetPart(index int, part *Part) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.parts[index] = part
+}
+
+// GetPartsCopy returns a copy of all parts for safe iteration
+func (s *streamingState) GetPartsCopy() map[int]*Part {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	copy := make(map[int]*Part, len(s.parts))
+	for k, v := range s.parts {
+		copy[k] = v
+	}
+	return copy
+}
+
+// Reset resets the streaming state
+func (s *streamingState) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionID = ""
+	s.messageID = ""
+	s.parts = make(map[int]*Part)
+	s.isActive = false
 }
 
 // workingDirectory returns the working directory from config or current directory
@@ -200,7 +242,10 @@ func NewApp(cfg Config) *App {
 	prompt := layout.NewPrompt(layout.DefaultPromptConfig(), theme)
 	keybindHints := layout.NewKeybindHintBar(theme)
 
-app := &App{
+	// Create context for goroutine lifecycle management
+	ctx, cancel := context.WithCancel(context.Background())
+
+	app := &App{
 		state:            state,
 		theme:            theme,
 		styles:           styles,
@@ -214,6 +259,8 @@ app := &App{
 		busService:       cfg.BusService,
 		eventChan:        make(chan tea.Msg, 100), // Buffer for streaming events
 		streamingState:   streamingState{parts: make(map[int]*Part)},
+		ctx:              ctx,
+		cancel:           cancel,
 		sidebar:          sidebar,
 		mobileSidebar:    mobileSidebar,
 		footer:           footer,
@@ -256,17 +303,28 @@ func (a *App) subscribeToBus() tea.Cmd {
 	partUpdatedChan, cleanupPart := a.busService.Subscribe(session.EventPartUpdated)
 	go func() {
 		defer cleanupPart()
-		for payload := range partUpdatedChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamPartUpdatedMsg{
-				SessionID: props["session_id"].(string),
-				MessageID: props["message_id"].(string),
-				PartID:    props["part_id"].(string),
-				Index:     props["index"].(int),
-				Delta:     props["delta"].(string),
-				DeltaType: props["delta_type"].(string),
+		for {
+			select {
+			case payload, ok := <-partUpdatedChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamPartUpdatedMsg{
+					SessionID: getStringProp(props, "session_id"),
+					MessageID: getStringProp(props, "message_id"),
+					PartID:    getStringProp(props, "part_id"),
+					Index:     getIntProp(props, "index"),
+					Delta:     getStringProp(props, "delta"),
+					DeltaType: getStringProp(props, "delta_type"),
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -274,16 +332,27 @@ func (a *App) subscribeToBus() tea.Cmd {
 	partCreatedChan, cleanupCreated := a.busService.Subscribe(session.EventPartCreated)
 	go func() {
 		defer cleanupCreated()
-		for payload := range partCreatedChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamPartCreatedMsg{
-				SessionID: props["session_id"].(string),
-				MessageID: props["message_id"].(string),
-				PartID:    props["part_id"].(string),
-				Index:     props["index"].(int),
-				Type:      props["type"].(string),
+		for {
+			select {
+			case payload, ok := <-partCreatedChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamPartCreatedMsg{
+					SessionID: getStringProp(props, "session_id"),
+					MessageID: getStringProp(props, "message_id"),
+					PartID:    getStringProp(props, "part_id"),
+					Index:     getIntProp(props, "index"),
+					Type:      getStringProp(props, "type"),
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -291,13 +360,24 @@ func (a *App) subscribeToBus() tea.Cmd {
 	msgCompleteChan, cleanupComplete := a.busService.Subscribe(session.EventMessageComplete)
 	go func() {
 		defer cleanupComplete()
-		for payload := range msgCompleteChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamMessageCompleteMsg{
-				SessionID: props["session_id"].(string),
-				MessageID: props["message_id"].(string),
+		for {
+			select {
+			case payload, ok := <-msgCompleteChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamMessageCompleteMsg{
+					SessionID: getStringProp(props, "session_id"),
+					MessageID: getStringProp(props, "message_id"),
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -305,21 +385,31 @@ func (a *App) subscribeToBus() tea.Cmd {
 	toolPendingChan, cleanupToolPending := a.busService.Subscribe(session.EventToolCallPending)
 	go func() {
 		defer cleanupToolPending()
-		for payload := range toolPendingChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamToolPendingMsg{
-				SessionID: props["session_id"].(string),
-				MessageID: props["message_id"].(string),
-				PartID:    props["part_id"].(string),
-				ToolName:  props["tool_name"].(string),
-				ToolID:    props["tool_id"].(string),
+		for {
+			select {
+			case payload, ok := <-toolPendingChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamToolPendingMsg{
+					SessionID: getStringProp(props, "session_id"),
+					MessageID: getStringProp(props, "message_id"),
+					PartID:    getStringProp(props, "part_id"),
+					ToolName:  getStringProp(props, "tool_name"),
+					ToolID:    getStringProp(props, "tool_id"),
+				}
+				if input, ok := props["input"].(map[string]interface{}); ok {
+					inputJSON, _ := json.Marshal(input)
+					msg.Input = string(inputJSON)
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			if input, ok := props["input"].(map[string]interface{}); ok {
-				// Convert input to JSON string for display
-				inputJSON, _ := json.Marshal(input)
-				msg.Input = string(inputJSON)
-			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -327,14 +417,25 @@ func (a *App) subscribeToBus() tea.Cmd {
 	toolRunningChan, cleanupToolRunning := a.busService.Subscribe(session.EventToolCallRunning)
 	go func() {
 		defer cleanupToolRunning()
-		for payload := range toolRunningChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamToolRunningMsg{
-				SessionID: props["session_id"].(string),
-				ToolName:  props["tool_name"].(string),
-				ToolID:    props["tool_id"].(string),
+		for {
+			select {
+			case payload, ok := <-toolRunningChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamToolRunningMsg{
+					SessionID: getStringProp(props, "session_id"),
+					ToolName:  getStringProp(props, "tool_name"),
+					ToolID:    getStringProp(props, "tool_id"),
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -342,19 +443,30 @@ func (a *App) subscribeToBus() tea.Cmd {
 	toolCompleteChan, cleanupToolComplete := a.busService.Subscribe(session.EventToolCallComplete)
 	go func() {
 		defer cleanupToolComplete()
-		for payload := range toolCompleteChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamToolCompleteMsg{
-				SessionID: props["session_id"].(string),
-				ToolName:  props["tool_name"].(string),
-				ToolID:    props["tool_id"].(string),
-				Result:    props["result"].(string),
-				IsError:   props["is_error"].(bool),
+		for {
+			select {
+			case payload, ok := <-toolCompleteChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamToolCompleteMsg{
+					SessionID: getStringProp(props, "session_id"),
+					ToolName:  getStringProp(props, "tool_name"),
+					ToolID:    getStringProp(props, "tool_id"),
+					Result:    getStringProp(props, "result"),
+					IsError:   getBoolProp(props, "is_error"),
+				}
+				if resultPart, ok := props["result_part"].(*database.Part); ok && resultPart != nil {
+					msg.ResultPartID = resultPart.ID
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			if resultPart, ok := props["result_part"].(*database.Part); ok {
-				msg.ResultPartID = resultPart.ID
-			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -362,14 +474,25 @@ func (a *App) subscribeToBus() tea.Cmd {
 	errorChan, cleanupError := a.busService.Subscribe(session.EventStreamError)
 	go func() {
 		defer cleanupError()
-		for payload := range errorChan {
-			props := payload.Properties.(map[string]interface{})
-			msg := StreamErrorMsg{
-				SessionID: props["session_id"].(string),
-				Error:     props["error"].(string),
-				ErrorType: props["error_type"].(string),
+		for {
+			select {
+			case payload, ok := <-errorChan:
+				if !ok {
+					return
+				}
+				props, ok := payload.Properties.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg := StreamErrorMsg{
+					SessionID: getStringProp(props, "session_id"),
+					Error:     getStringProp(props, "error"),
+					ErrorType: getStringProp(props, "error_type"),
+				}
+				a.eventChan <- msg
+			case <-a.ctx.Done():
+				return
 			}
-			a.eventChan <- msg
 		}
 	}()
 
@@ -384,6 +507,40 @@ func (a *App) waitForEvent() tea.Cmd {
 	return func() tea.Msg {
 		return <-a.eventChan
 	}
+}
+
+// Cleanup performs cleanup when the app exits
+func (a *App) Cleanup() {
+	if a.cancel != nil {
+		a.cancel()
+	}
+}
+
+// getStringProp safely extracts a string property from a map
+func getStringProp(props map[string]interface{}, key string) string {
+	if val, ok := props[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+// getIntProp safely extracts an int property from a map
+func getIntProp(props map[string]interface{}, key string) int {
+	if val, ok := props[key].(int); ok {
+		return val
+	}
+	if val, ok := props[key].(float64); ok {
+		return int(val)
+	}
+	return 0
+}
+
+// getBoolProp safely extracts a bool property from a map
+func getBoolProp(props map[string]interface{}, key string) bool {
+	if val, ok := props[key].(bool); ok {
+		return val
+	}
+	return false
 }
 
 // Init initializes the app (tea.Model interface)
@@ -1236,7 +1393,9 @@ a.handleStreamToolPending(msg)
 		// Tool execution started
 		if msg.SessionID == a.state.SessionID {
 			// Find the part for this tool and update status to running
-			for _, part := range a.streamingState.parts {
+			// Use copy to avoid race conditions during iteration
+			partsCopy := a.streamingState.GetPartsCopy()
+			for _, part := range partsCopy {
 				if part.ToolID == msg.ToolID {
 					part.Status = "running"
 
@@ -2568,12 +2727,10 @@ func (a *App) setError(err error) {
 func (a *App) handleStreamPartCreated(msg StreamPartCreatedMsg) {
 	// Initialize streaming state for new message if needed
 	if !a.streamingState.isActive || a.streamingState.messageID != msg.MessageID {
-		a.streamingState = streamingState{
-			sessionID: msg.SessionID,
-			messageID: msg.MessageID,
-			parts:     make(map[int]*Part),
-			isActive:  true,
-		}
+		a.streamingState.Reset()
+		a.streamingState.sessionID = msg.SessionID
+		a.streamingState.messageID = msg.MessageID
+		a.streamingState.isActive = true
 
 		// Create a new assistant message placeholder
 		a.addMessage(Message{
@@ -2596,7 +2753,7 @@ func (a *App) handleStreamPartCreated(msg StreamPartCreatedMsg) {
 	}
 
 	// Track it in streaming state
-	a.streamingState.parts[msg.Index] = newPart
+	a.streamingState.SetPart(msg.Index, newPart)
 
 	// Add it to the message's Parts array
 	messages := a.state.Sync.Messages
@@ -2622,7 +2779,7 @@ func (a *App) handleStreamPartCreated(msg StreamPartCreatedMsg) {
 // handleStreamPartUpdated handles when a part receives new content
 func (a *App) handleStreamPartUpdated(msg StreamPartUpdatedMsg) {
 	// Find the part in streaming state
-	part, exists := a.streamingState.parts[msg.Index]
+	part, exists := a.streamingState.GetPart(msg.Index)
 	if !exists {
 		return
 	}
@@ -2660,7 +2817,7 @@ func (a *App) handleStreamPartUpdated(msg StreamPartUpdatedMsg) {
 // handleStreamPartComplete handles when a part is finished
 func (a *App) handleStreamPartComplete(msg StreamPartCompleteMsg) {
 	// Find the part and mark as complete
-	part, exists := a.streamingState.parts[msg.Index]
+	part, exists := a.streamingState.GetPart(msg.Index)
 	if exists {
 		part.Status = "complete"
 
@@ -2681,8 +2838,7 @@ func (a *App) handleStreamPartComplete(msg StreamPartCompleteMsg) {
 // handleStreamMessageComplete handles when the whole message is finished
 func (a *App) handleStreamMessageComplete(msg StreamMessageCompleteMsg) {
 	// Clear streaming state
-	a.streamingState.isActive = false
-	a.streamingState.parts = make(map[int]*Part)
+	a.streamingState.Reset()
 
 	// Mark processing as done
 	a.state.Processing = false
@@ -2697,7 +2853,7 @@ func (a *App) handleStreamMessageComplete(msg StreamMessageCompleteMsg) {
 // handleStreamToolPending handles when a tool call starts
 func (a *App) handleStreamToolPending(msg StreamToolPendingMsg) {
 	// Find the part for this tool
-	part, exists := a.streamingState.parts[msg.PartIndex]
+	part, exists := a.streamingState.GetPart(msg.PartIndex)
 	if exists {
 		// Update tool part with tool details
 		part.Type = "tool_use"
@@ -2726,7 +2882,9 @@ func (a *App) handleStreamToolPending(msg StreamToolPendingMsg) {
 // handleStreamToolComplete handles when tool execution finishes
 func (a *App) handleStreamToolComplete(msg StreamToolCompleteMsg) {
 	// Find the tool_use part and create corresponding tool_result
-	for idx, part := range a.streamingState.parts {
+	// Use copy to avoid race conditions during iteration
+	partsCopy := a.streamingState.GetPartsCopy()
+	for idx, part := range partsCopy {
 		if part.ToolID == msg.ToolID {
 			// Mark tool_use as complete
 			part.Status = "complete"
@@ -2766,7 +2924,7 @@ func (a *App) handleStreamToolComplete(msg StreamToolCompleteMsg) {
 					}
 
 					// Also track in streaming state
-					a.streamingState.parts[idx+1] = &resultPart
+					a.streamingState.SetPart(idx+1, &resultPart)
 				}
 			}
 			break
