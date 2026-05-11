@@ -135,6 +135,7 @@ Session Continuation:
 	rootCmd.AddCommand(NewDebugCommand())
 	rootCmd.AddCommand(NewExportCommand())
 	rootCmd.AddCommand(NewImportCommand())
+	rootCmd.AddCommand(NewMigrateCommand())
 	rootCmd.AddCommand(NewUpgradeCommand())
 	rootCmd.AddCommand(NewPathsCommand())
 
