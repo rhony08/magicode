@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
@@ -181,7 +182,22 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 
 	// 5. Multi-turn loop: stream, execute tools, continue if needed
 	currentMessageID := assistantMsg.ID
+	maxIterations := 20 // Prevent infinite loops
+	iteration := 0
+
+	// Doom loop detection: track last tool calls
+	lastToolCalls := []ToolResult{}
+	doomLoopThreshold := 3
+
 	for {
+		if iteration >= maxIterations {
+			p.logger.Warn("Max iterations reached, stopping tool loop", map[string]interface{}{
+				"session_id": req.SessionID,
+				"iterations": iteration,
+			})
+			break
+		}
+
 		// Build chat request for this turn
 		chatReq := p.buildChatRequestWithContentMessages(req, contentMessages)
 
@@ -220,20 +236,20 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 				Content: assistantContent,
 			})
 
-			// Add tool result messages
+			// Combine ALL tool results into ONE user message (Anthropic requirement)
+			toolResultParts := []provider.ContentPart{}
 			for _, tr := range result.ToolResults {
-				contentMessages = append(contentMessages, provider.ContentMessage{
-					Role: provider.RoleUser,
-					Content: []provider.ContentPart{
-						provider.ToolResultPart{
-							Type:      "tool_result",
-							ToolUseID: tr.ToolID,
-							Content:   tr.Result,
-							IsError:   tr.IsError,
-						},
-					},
+				toolResultParts = append(toolResultParts, provider.ToolResultPart{
+					Type:      "tool_result",
+					ToolUseID: tr.ToolID,
+					Content:   tr.Result,
+					IsError:   tr.IsError,
 				})
 			}
+			contentMessages = append(contentMessages, provider.ContentMessage{
+				Role:    provider.RoleUser,
+				Content: toolResultParts,
+			})
 
 			// Create new assistant message for next turn
 			newAssistantMsg, err := p.createAssistantMessage(processCtx, req)
@@ -249,8 +265,36 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 					"message_id": currentMessageID,
 					"role":       "assistant",
 					"turn":       "tool_loop",
+					"iteration":  iteration + 1,
 				})
 			}
+
+			// Doom loop detection: check if same tool calls repeated
+			if len(result.ToolResults) >= doomLoopThreshold {
+				isDoomLoop := true
+				for i := 0; i < doomLoopThreshold; i++ {
+					current := result.ToolResults[len(result.ToolResults)-1-i]
+					previous := lastToolCalls[len(lastToolCalls)-1-i]
+					if current.ToolName != previous.ToolName ||
+						current.Result != previous.Result {
+						isDoomLoop = false
+						break
+					}
+				}
+				if isDoomLoop {
+					p.logger.Warn("Doom loop detected - same tool calls repeated", map[string]interface{}{
+						"session_id": req.SessionID,
+						"tool_name":  result.ToolResults[0].ToolName,
+						"iterations": iteration,
+					})
+					// Break out of loop to prevent infinite repetition
+					break
+				}
+			}
+
+			// Track tool calls for doom loop detection
+			lastToolCalls = result.ToolResults
+			iteration++
 
 			// Continue loop - will make new streaming request with tool results
 			continue
@@ -734,8 +778,25 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 		})
 	}
 
-	// Execute the tool
-	result, err := p.ExecuteTool(ctx, toolName, input, toolCtx)
+	// Execute the tool with timeout (default 2 minutes per tool)
+	toolTimeout := 2 * time.Minute
+	toolCtxWithTimeout, cancelTool := context.WithTimeout(ctx, toolTimeout)
+	defer cancelTool()
+
+	// Update Abort context for tool execution
+	toolCtx.Abort = toolCtxWithTimeout
+
+	result, err := p.ExecuteTool(toolCtxWithTimeout, toolName, input, toolCtx)
+
+	// Handle timeout specifically
+	if ctx.Err() == context.DeadlineExceeded {
+		p.logger.Warn("Tool execution timed out", map[string]interface{}{
+			"tool_name":  toolName,
+			"timeout":    toolTimeout.String(),
+			"session_id": sessionID,
+		})
+		err = fmt.Errorf("tool execution timed out after %s", toolTimeout.String())
+	}
 
 	// Create tool_result part
 	resultPart := database.Part{
