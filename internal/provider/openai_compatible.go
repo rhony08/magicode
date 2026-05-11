@@ -176,6 +176,16 @@ func NewDeepInfraProvider(apiKey string) *OpenAICompatibleProvider {
 	return NewOpenAICompatibleProvider(ProviderDeepInfra, apiKey)
 }
 
+// NewAlibabaProvider creates a new Alibaba Cloud provider
+func NewAlibabaProvider(apiKey string) *OpenAICompatibleProvider {
+	return NewOpenAICompatibleProvider(ProviderAlibaba, apiKey)
+}
+
+// NewAlibabaCNProvider creates a new Alibaba Cloud CN provider
+func NewAlibabaCNProvider(apiKey string) *OpenAICompatibleProvider {
+	return NewOpenAICompatibleProvider(ProviderAlibabaCN, apiKey)
+}
+
 // CustomOpenAICompatibleProvider creates a provider with custom configuration
 // This is used for dynamic providers loaded from OpenCode config
 func CustomOpenAICompatibleProvider(providerID ProviderID, name, baseURL, apiKey string, models map[ModelID]ModelInfo) *OpenAICompatibleProvider {

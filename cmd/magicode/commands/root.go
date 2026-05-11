@@ -430,25 +430,29 @@ func convertPartsToTUI(parts []database.Part) []tui.Part {
 // initializeAIComponents initializes AI processing components with lazy loading
 // Only initializes the provider for the default/used model, not all providers
 func initializeAIComponents(ctx context.Context, workDir string, defaultModel string) (*provider.ProviderRegistry, *tool.Registry, *bus.Service, *session.Processor) {
-	// 1. Create provider registry (empty initially)
+	// 1. Create provider registry
 	registry := provider.NewProviderRegistry()
 
-	// 2. Register ONLY the default provider if API key is available
+	// 2. Register ALL providers that have API keys available
+	// This allows users to switch between providers in the TUI
+	registerProvidersFromEnv(registry)
+
+	// 3. If a default model is specified and its provider isn't registered, register it
 	if defaultModel != "" {
-		registerDefaultProvider(registry, defaultModel)
-	} else {
-		// Try to find a default model from available API keys
-		findAndRegisterDefaultProvider(registry)
+		providerID, _ := provider.ParseModelID(provider.ModelID(defaultModel))
+		if _, ok := registry.Get(providerID); !ok {
+			registerDefaultProvider(registry, defaultModel)
+		}
 	}
 
-	// 3. Create tool registry and register all tools
+	// 4. Create tool registry and register all tools
 	toolRegistry := tool.NewRegistry()
 	registerAllTools(toolRegistry)
 
-	// 4. Create bus service for events
+	// 5. Create bus service for events
 	busService := bus.New(ctx, nil)
 
-	// 5. Open database for processor
+	// 6. Open database for processor
 	dbPath := global.DatabasePath()
 	db, err := database.New(ctx, database.Config{Path: dbPath})
 	if err != nil {
@@ -456,7 +460,7 @@ func initializeAIComponents(ctx context.Context, workDir string, defaultModel st
 		return registry, toolRegistry, busService, nil
 	}
 
-	// 6. Create session processor
+	// 7. Create session processor
 	processor := session.NewProcessor(session.ProcessorConfig{
 		Registry:     registry,
 		DB:           db,
@@ -464,7 +468,7 @@ func initializeAIComponents(ctx context.Context, workDir string, defaultModel st
 		ToolRegistry: toolRegistry,
 	})
 
-	log.Info("Initialized AI components", "default_provider", defaultModel, "tools", len(toolRegistry.List()))
+	log.Info("Initialized AI components", "providers", len(registry.ListProviders()), "tools", len(toolRegistry.List()))
 
 	return registry, toolRegistry, busService, processor
 }
@@ -509,6 +513,8 @@ func registerDefaultProvider(registry *provider.ProviderRegistry, modelID string
 		registry.Register(provider.NewCerebrasProvider(apiKey))
 	case provider.ProviderDeepInfra:
 		registry.Register(provider.NewDeepInfraProvider(apiKey))
+	case provider.ProviderAlibaba, provider.ProviderAlibabaCN:
+		registry.Register(provider.NewAlibabaProvider(apiKey))
 	default:
 		log.Warn("Unknown provider", "provider", providerID)
 	}
@@ -520,6 +526,8 @@ func findAndRegisterDefaultProvider(registry *provider.ProviderRegistry) {
 	priorityProviders := []provider.ProviderID{
 		provider.ProviderAnthropic,
 		provider.ProviderOpenAI,
+		provider.ProviderAlibaba,
+		provider.ProviderAlibabaCN,
 		provider.ProviderOpenRouter,
 		provider.ProviderGroq,
 	}
@@ -532,7 +540,7 @@ func findAndRegisterDefaultProvider(registry *provider.ProviderRegistry) {
 		}
 	}
 
-	log.Warn("No API keys found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.")
+	log.Warn("No API keys found. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, ALIBABA_API_KEY, etc.")
 }
 
 // getAPIKeyForProvider returns the API key for a provider from environment
@@ -558,6 +566,12 @@ func getAPIKeyForProvider(providerID provider.ProviderID) string {
 		return os.Getenv("CEREBRAS_API_KEY")
 	case provider.ProviderDeepInfra:
 		return os.Getenv("DEEPINFRA_API_KEY")
+	case provider.ProviderAlibaba, provider.ProviderAlibabaCN:
+		// Try ALIBABA_API_KEY first, then DASHSCOPE_API_KEY
+		if key := os.Getenv("ALIBABA_API_KEY"); key != "" {
+			return key
+		}
+		return os.Getenv("DASHSCOPE_API_KEY")
 	}
 	return ""
 }
@@ -643,6 +657,18 @@ func registerProvidersFromEnv(registry *provider.ProviderRegistry) {
 		deepinfra := provider.NewDeepInfraProvider(apiKey)
 		registry.Register(deepinfra)
 		log.Info("Registered DeepInfra provider")
+	}
+
+	// Alibaba / Bailian
+	if apiKey := os.Getenv("ALIBABA_API_KEY"); apiKey != "" {
+		alibaba := provider.NewAlibabaProvider(apiKey)
+		registry.Register(alibaba)
+		log.Info("Registered Alibaba provider")
+	}
+	if apiKey := os.Getenv("DASHSCOPE_API_KEY"); apiKey != "" {
+		alibaba := provider.NewAlibabaProvider(apiKey)
+		registry.Register(alibaba)
+		log.Info("Registered Alibaba provider (via DASHSCOPE_API_KEY)")
 	}
 
 	// If no providers registered, show warning
