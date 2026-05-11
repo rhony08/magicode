@@ -26,6 +26,8 @@ func RegisterBundledProviders(registry *ProviderRegistry) {
 		ProviderXAI,
 		ProviderCerebras,
 		ProviderDeepInfra,
+		ProviderAlibaba,
+		ProviderAlibabaCN,
 	}
 
 	for _, providerID := range bundledProviders {

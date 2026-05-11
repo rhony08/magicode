@@ -55,11 +55,29 @@ type PathConfig struct {
 // Provider represents provider configuration
 type Provider struct {
 	Name        string                 `json:"name,omitempty"`
-	Env         []string               `json:"env,omitempty"`
-	Options     map[string]interface{} `json:"options,omitempty"`
-	Models      map[string]interface{} `json:"models,omitempty"`
+	Type        string                 `json:"type,omitempty"`      // Provider type: openai-compatible, anthropic, etc.
+	BaseURL     string                 `json:"baseURL,omitempty"`   // API base URL
+	Env         []string               `json:"env,omitempty"`       // Environment variable names for API key
+	Options     map[string]interface{} `json:"options,omitempty"`   // Provider-specific options
+	Models      map[string]Model       `json:"models,omitempty"`    // Model configurations
 	Blacklist   []string               `json:"blacklist,omitempty"`
 	Whitelist   []string               `json:"whitelist,omitempty"`
+}
+
+// Model represents a model configuration
+type Model struct {
+	Name        string    `json:"name,omitempty"`
+	Description string    `json:"description,omitempty"`
+	ToolCall    bool      `json:"tool_call,omitempty"`
+	Temperature bool      `json:"temperature,omitempty"`
+	Reasoning   bool      `json:"reasoning,omitempty"`
+	Limit       ModelLimit `json:"limit,omitempty"`
+}
+
+// ModelLimit represents token limits
+type ModelLimit struct {
+	Context int `json:"context,omitempty"`
+	Output  int `json:"output,omitempty"`
 }
 
 // Service provides configuration access
@@ -435,4 +453,76 @@ func mergeBoolMaps(a, b map[string]bool) map[string]bool {
 // ConfigPath returns the path of the loaded config file
 func (s *Service) ConfigPath() string {
 	return s.configPath
+}
+
+// GetAPIKey returns the API key for a provider from environment variables
+func (p *Provider) GetAPIKey() string {
+	for _, envVar := range p.Env {
+		if key := os.Getenv(envVar); key != "" {
+			return key
+		}
+	}
+	// Check in options
+	if p.Options != nil {
+		if key, ok := p.Options["apiKey"].(string); ok && key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// GetBaseURL returns the base URL for the provider
+func (p *Provider) GetBaseURL() string {
+	if p.BaseURL != "" {
+		return p.BaseURL
+	}
+	// Check in options
+	if p.Options != nil {
+		if url, ok := p.Options["baseURL"].(string); ok && url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+// GetProvider returns a provider configuration by ID
+func (s *Service) GetProvider(id string) *Provider {
+	if provider, ok := s.config.Providers[id]; ok {
+		return &provider
+	}
+	return nil
+}
+
+// ListProviders returns all enabled providers
+func (s *Service) ListProviders() map[string]Provider {
+	result := make(map[string]Provider)
+	for id, provider := range s.config.Providers {
+		if s.IsProviderEnabled(id) {
+			result[id] = provider
+		}
+	}
+	return result
+}
+
+// IsProviderEnabled checks if a provider is enabled
+func (s *Service) IsProviderEnabled(providerID string) bool {
+	// Check if explicitly disabled
+	for _, id := range s.config.DisabledProviders {
+		if id == providerID {
+			return false
+		}
+	}
+
+	// If enabled list is set, provider must be in it
+	if len(s.config.EnabledProviders) > 0 {
+		for _, id := range s.config.EnabledProviders {
+			if id == providerID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Provider is enabled by default
+	return true
 }

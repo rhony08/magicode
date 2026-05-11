@@ -22,6 +22,9 @@ const (
 	ProviderPerplexity    ProviderID = "perplexity"
 	ProviderDeepInfra     ProviderID = "deepinfra"
 	ProviderGitHubCopilot ProviderID = "github-copilot"
+	// Alibaba/Bailian providers
+	ProviderAlibaba   ProviderID = "alibaba"
+	ProviderAlibabaCN ProviderID = "alibaba-cn"
 )
 
 // ModelID is a unique identifier for a model (format: provider/model-name)

@@ -50,6 +50,10 @@ func getProviderDescription(id ProviderID) string {
 		return "Cerebras - fast inference with wafer-scale engine"
 	case ProviderDeepInfra:
 		return "DeepInfra - cost-effective inference platform"
+	case ProviderAlibaba:
+		return "Alibaba Cloud - Qwen models via DashScope"
+	case ProviderAlibabaCN:
+		return "Alibaba Cloud CN - Qwen models via DashScope"
 	default:
 		return "OpenAI-compatible provider"
 	}
@@ -100,6 +104,17 @@ var bundledProviderConfigs = map[ProviderID]struct {
 		baseURL: "https://api.deepinfra.com/v1/openai",
 		envKeys: []string{"DEEPINFRA_API_KEY"},
 		name:    "DeepInfra",
+	},
+	// Alibaba/Bailian providers
+	ProviderAlibaba: {
+		baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		envKeys: []string{"ALIBABA_API_KEY", "DASHSCOPE_API_KEY"},
+		name:    "Alibaba Cloud",
+	},
+	ProviderAlibabaCN: {
+		baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		envKeys: []string{"ALIBABA_API_KEY", "DASHSCOPE_API_KEY"},
+		name:    "Alibaba Cloud (CN)",
 	},
 }
 
@@ -325,6 +340,18 @@ var PopularModels = map[ProviderID][]ModelInfo{
 	ProviderDeepInfra: {
 		{ID: FormatModelID(ProviderDeepInfra, "meta-llama/Llama-3.3-70B-Instruct-Turbo"), Name: "Llama 3.3 70B", SupportsTools: true, SupportsStreaming: true},
 		{ID: FormatModelID(ProviderDeepInfra, "mistralai/Mistral-Small-24B-Instruct-2501"), Name: "Mistral Small 24B", SupportsTools: true, SupportsStreaming: true},
+	},
+	// Alibaba/Bailian Qwen models
+	ProviderAlibaba: {
+		{ID: FormatModelID(ProviderAlibaba, "qwen-max"), Name: "Qwen Max", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 32768, MaxOutputTokens: 8192},
+		{ID: FormatModelID(ProviderAlibaba, "qwen-plus"), Name: "Qwen Plus", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 131072, MaxOutputTokens: 8192},
+		{ID: FormatModelID(ProviderAlibaba, "qwen-turbo"), Name: "Qwen Turbo", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 131072, MaxOutputTokens: 8192},
+		{ID: FormatModelID(ProviderAlibaba, "qwen-coder-plus"), Name: "Qwen Coder Plus", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 131072, MaxOutputTokens: 8192},
+	},
+	ProviderAlibabaCN: {
+		{ID: FormatModelID(ProviderAlibabaCN, "qwen-max"), Name: "Qwen Max (CN)", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 32768, MaxOutputTokens: 8192},
+		{ID: FormatModelID(ProviderAlibabaCN, "qwen-plus"), Name: "Qwen Plus (CN)", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 131072, MaxOutputTokens: 8192},
+		{ID: FormatModelID(ProviderAlibabaCN, "qwen-turbo"), Name: "Qwen Turbo (CN)", SupportsTools: true, SupportsStreaming: true, MaxInputTokens: 131072, MaxOutputTokens: 8192},
 	},
 }
 
