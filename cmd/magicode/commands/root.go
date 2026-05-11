@@ -433,11 +433,20 @@ func initializeAIComponents(ctx context.Context, workDir string, defaultModel st
 	// 1. Create provider registry
 	registry := provider.NewProviderRegistry()
 
-	// 2. Register ALL providers that have API keys available
-	// This allows users to switch between providers in the TUI
+	// 2. Load config service to get providers from config file
+	configService, err := config.New(workDir, global.Path.Config)
+	if err != nil {
+		log.Warn("Failed to load config, using defaults", "error", err)
+		configService = config.NewDefault()
+	}
+
+	// 3. Register providers from config file (includes OpenCode config)
+	registerProvidersFromConfig(registry, configService)
+
+	// 4. Register providers from environment variables (env takes precedence)
 	registerProvidersFromEnv(registry)
 
-	// 3. If a default model is specified and its provider isn't registered, register it
+	// 5. If a default model is specified and its provider isn't registered, register it
 	if defaultModel != "" {
 		providerID, _ := provider.ParseModelID(provider.ModelID(defaultModel))
 		if _, ok := registry.Get(providerID); !ok {
@@ -445,14 +454,14 @@ func initializeAIComponents(ctx context.Context, workDir string, defaultModel st
 		}
 	}
 
-	// 4. Create tool registry and register all tools
+	// 6. Create tool registry and register all tools
 	toolRegistry := tool.NewRegistry()
 	registerAllTools(toolRegistry)
 
-	// 5. Create bus service for events
+	// 7. Create bus service for events
 	busService := bus.New(ctx, nil)
 
-	// 6. Open database for processor
+	// 8. Open database for processor
 	dbPath := global.DatabasePath()
 	db, err := database.New(ctx, database.Config{Path: dbPath})
 	if err != nil {
@@ -460,7 +469,7 @@ func initializeAIComponents(ctx context.Context, workDir string, defaultModel st
 		return registry, toolRegistry, busService, nil
 	}
 
-	// 7. Create session processor
+	// 9. Create session processor
 	processor := session.NewProcessor(session.ProcessorConfig{
 		Registry:     registry,
 		DB:           db,
@@ -676,6 +685,143 @@ func registerProvidersFromEnv(registry *provider.ProviderRegistry) {
 		log.Warn("No AI providers configured. Set API keys in environment:")
 		log.Warn("  ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, etc.")
 	}
+}
+
+// registerProvidersFromConfig registers providers defined in the config file
+// This allows providers to be configured via magicode.json or opencode.json
+func registerProvidersFromConfig(registry *provider.ProviderRegistry, cfg *config.Service) {
+	providers := cfg.ListProviders()
+	if len(providers) == 0 {
+		return
+	}
+
+	for id, providerCfg := range providers {
+		// Skip if already registered (e.g., from env vars)
+		providerID := provider.ProviderID(id)
+		if _, ok := registry.Get(providerID); ok {
+			log.Debug("Provider already registered, skipping config", "provider", id)
+			continue
+		}
+
+		// Get API key from config
+		apiKey := providerCfg.GetAPIKey()
+		if apiKey == "" {
+			log.Debug("No API key found for provider in config", "provider", id)
+			continue
+		}
+
+		// Get base URL from config
+		baseURL := providerCfg.GetBaseURL()
+
+		log.Info("Registering provider from config", "provider", id, "name", providerCfg.Name)
+
+		// Register based on provider type
+		switch providerCfg.Type {
+		case "anthropic":
+			p := provider.NewAnthropicProvider(apiKey)
+			registry.Register(p)
+		case "openai":
+			p := provider.NewOpenAIProvider(apiKey)
+			registry.Register(p)
+		case "openai-compatible", "":
+			// For OpenAI-compatible providers, use the dynamic provider
+			if baseURL == "" {
+				// Try to get from bundled configs
+				if bundled := getBundledProviderConfig(providerID); bundled != nil {
+					baseURL = bundled.baseURL
+				}
+			}
+			if baseURL == "" {
+				log.Warn("No baseURL found for OpenAI-compatible provider", "provider", id)
+				continue
+			}
+
+			// Create custom OpenAI-compatible provider
+			models := convertConfigModels(providerCfg.Models, providerID)
+			p := provider.CustomOpenAICompatibleProvider(
+				providerID,
+				providerCfg.Name,
+				baseURL,
+				apiKey,
+				models,
+			)
+			registry.Register(p)
+			log.Info("Registered custom OpenAI-compatible provider", "provider", id, "baseURL", baseURL)
+		default:
+			log.Warn("Unknown provider type in config", "provider", id, "type", providerCfg.Type)
+		}
+	}
+}
+
+// getBundledProviderConfig returns bundled provider config if it exists
+func getBundledProviderConfig(id provider.ProviderID) *struct {
+	baseURL string
+	envKeys []string
+	name    string
+} {
+	// This is a workaround since bundledProviderConfigs is private
+	// We try to create the provider and get its config
+	switch id {
+	case provider.ProviderOpenRouter:
+		return &struct {
+			baseURL string
+			envKeys []string
+			name    string
+		}{
+			baseURL: "https://openrouter.ai/api/v1",
+			envKeys: []string{"OPENROUTER_API_KEY"},
+			name:    "OpenRouter",
+		}
+	case provider.ProviderGroq:
+		return &struct {
+			baseURL string
+			envKeys []string
+			name    string
+		}{
+			baseURL: "https://api.groq.com/openai/v1",
+			envKeys: []string{"GROQ_API_KEY"},
+			name:    "Groq",
+		}
+	case provider.ProviderMistral:
+		return &struct {
+			baseURL string
+			envKeys []string
+			name    string
+		}{
+			baseURL: "https://api.mistral.ai/v1",
+			envKeys: []string{"MISTRAL_API_KEY"},
+			name:    "Mistral",
+		}
+	case provider.ProviderAlibaba, provider.ProviderAlibabaCN:
+		return &struct {
+			baseURL string
+			envKeys []string
+			name    string
+		}{
+			baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+			envKeys: []string{"ALIBABA_API_KEY", "DASHSCOPE_API_KEY"},
+			name:    "Alibaba Cloud",
+		}
+	}
+	return nil
+}
+
+// convertConfigModels converts config models to provider ModelInfo
+func convertConfigModels(models map[string]config.Model, providerID provider.ProviderID) map[provider.ModelID]provider.ModelInfo {
+	result := make(map[provider.ModelID]provider.ModelInfo)
+	for id, model := range models {
+		modelID := provider.FormatModelID(providerID, id)
+		result[modelID] = provider.ModelInfo{
+			ID:                modelID,
+			Name:              model.Name,
+			Description:       model.Description,
+			SupportsTools:     model.ToolCall,
+			SupportsStreaming: true, // Assume streaming support
+			MaxInputTokens:    model.Limit.Context,
+			MaxOutputTokens:   model.Limit.Output,
+		}
+	}
+	return result
 }
 
 // registerAllTools registers all available tools
