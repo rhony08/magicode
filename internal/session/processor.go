@@ -842,6 +842,90 @@ func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID
 					"error_type": e.Error.Type,
 				})
 			}
+
+		case provider.StepStartEvent:
+			// Step tracking - captures snapshot at beginning of processing step
+			// Used for multi-step reasoning and progress tracking
+			p.logger.Info("Step started", map[string]interface{}{
+				"session_id":  sessionID,
+				"message_id":  messageID,
+				"snapshot_id": e.SnapshotID,
+			})
+
+			// Create step-start part
+			stepPart := database.Part{
+				MessageID: messageID,
+				SessionID: sessionID,
+				Data: database.PartData{
+					Type:       "step-start",
+					SnapshotID: e.SnapshotID,
+				},
+			}
+			_, err := p.parts.Create(ctx, stepPart)
+			if err != nil {
+				p.logger.Error("Failed to create step-start part", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+
+			// Publish step started event
+			if p.bus != nil {
+				p.bus.Publish(EventPartCreated, map[string]interface{}{
+					"session_id":  sessionID,
+					"message_id":  messageID,
+					"type":        "step-start",
+					"snapshot_id": e.SnapshotID,
+				})
+			}
+
+		case provider.StepFinishEvent:
+			// Step tracking - captures usage, cost, and finish reason
+			// Used for multi-step reasoning and progress tracking
+			p.logger.Info("Step finished", map[string]interface{}{
+				"session_id": sessionID,
+				"message_id": messageID,
+				"tokens":     e.Tokens,
+				"cost":       e.Cost,
+				"reason":     e.Reason,
+			})
+
+			// Create step-finish part
+			stepPart := database.Part{
+				MessageID: messageID,
+				SessionID: sessionID,
+				Data: database.PartData{
+					Type:       "step-finish",
+					SnapshotID: "", // Would be captured by snapshot service
+					StepReason: e.Reason,
+				},
+			}
+			_, err := p.parts.Create(ctx, stepPart)
+			if err != nil {
+				p.logger.Error("Failed to create step-finish part", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+
+			// Track token usage from step
+			result.Tokens = TokenUsage{
+				Input:      e.Tokens.InputTokens,
+				Output:     e.Tokens.OutputTokens,
+				CacheRead:  e.Tokens.CacheRead,
+				CacheWrite: e.Tokens.CacheWrite,
+				Total:      e.Tokens.TotalTokens,
+			}
+
+			// Publish step finished event
+			if p.bus != nil {
+				p.bus.Publish(EventPartComplete, map[string]interface{}{
+					"session_id": sessionID,
+					"message_id": messageID,
+					"type":       "step-finish",
+					"tokens":     e.Tokens,
+					"cost":       e.Cost,
+					"reason":     e.Reason,
+				})
+			}
 		}
 	}
 
