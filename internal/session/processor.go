@@ -43,6 +43,22 @@ var (
 	EventStreamError = bus.Definition{Type: "session.stream.error"}
 )
 
+// StreamResult tracks results from streaming for multi-turn support
+type StreamResult struct {
+	StopReason   string        // "end_turn", "tool_use", "max_tokens", etc.
+	ToolResults  []ToolResult  // Tool execution results
+	IsError      bool          // Whether streaming ended with error
+	Error        error         // Error if any
+}
+
+// ToolResult tracks a single tool execution result
+type ToolResult struct {
+	ToolID   string
+	ToolName string
+	Result   string
+	IsError  bool
+}
+
 // Processor handles AI message processing with streaming support
 type Processor struct {
 	registry     *provider.ProviderRegistry
@@ -100,6 +116,7 @@ type ProcessRequest struct {
 
 // Process streams response from AI, executes tools, stores results
 // This is the main entry point for processing a user message
+// Supports multi-turn tool loops - continues streaming after tool execution
 func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 	p.logger.Info("Processing message", map[string]interface{}{
 		"session_id": req.SessionID,
@@ -137,17 +154,17 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 		})
 	}
 
-	// 2. Build provider request
-	chatReq := p.buildChatRequest(req)
-
-	// 3. Get provider from registry
+	// 2. Get provider from registry
 	providerID, _ := provider.ParseModelID(req.Model)
 	prov, ok := p.registry.Get(providerID)
 	if !ok {
 		return fmt.Errorf("provider not found: %s", providerID)
 	}
 
-	// 4. Create assistant message in DB (for storing parts)
+	// 3. Build initial messages list (user message + history)
+	contentMessages := p.buildContentMessagesForProvider(req.History, userMsg, req.UserMessage)
+
+	// 4. Create initial assistant message in DB
 	assistantMsg, err := p.createAssistantMessage(processCtx, req)
 	if err != nil {
 		return fmt.Errorf("failed to create assistant message: %w", err)
@@ -162,24 +179,86 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 		})
 	}
 
-	// 5. Start streaming
-	events, err := prov.StreamChat(processCtx, chatReq)
-	if err != nil {
-		p.logger.Error("StreamChat failed", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Publish error event
-		if p.bus != nil {
-			p.bus.Publish(EventStreamError, map[string]interface{}{
-				"session_id": req.SessionID,
-				"error":      err.Error(),
-			})
-		}
-		return fmt.Errorf("stream failed: %w", err)
-	}
+	// 5. Multi-turn loop: stream, execute tools, continue if needed
+	currentMessageID := assistantMsg.ID
+	for {
+		// Build chat request for this turn
+		chatReq := p.buildChatRequestWithContentMessages(req, contentMessages)
 
-	// 6. Process stream events
-	p.processStreamEvents(processCtx, req.SessionID, assistantMsg.ID, events)
+		// Start streaming
+		events, err := prov.StreamChat(processCtx, chatReq)
+		if err != nil {
+			p.logger.Error("StreamChat failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			if p.bus != nil {
+				p.bus.Publish(EventStreamError, map[string]interface{}{
+					"session_id": req.SessionID,
+					"error":      err.Error(),
+				})
+			}
+			return fmt.Errorf("stream failed: %w", err)
+		}
+
+		// Process stream events and collect results
+		result := p.processStreamEventsWithResult(processCtx, req.SessionID, currentMessageID, events)
+
+		// Check if we need to continue with tool results
+		if result.StopReason == "tool_use" && len(result.ToolResults) > 0 {
+			p.logger.Info("Continuing with tool results", map[string]interface{}{
+				"session_id":   req.SessionID,
+				"tool_count":   len(result.ToolResults),
+				"stop_reason":  result.StopReason,
+			})
+
+			// Build assistant message content from parts
+			assistantContent := p.buildAssistantContent(req.SessionID, currentMessageID)
+
+			// Add assistant message to conversation
+			contentMessages = append(contentMessages, provider.ContentMessage{
+				Role:    provider.RoleAssistant,
+				Content: assistantContent,
+			})
+
+			// Add tool result messages
+			for _, tr := range result.ToolResults {
+				contentMessages = append(contentMessages, provider.ContentMessage{
+					Role: provider.RoleUser,
+					Content: []provider.ContentPart{
+						provider.ToolResultPart{
+							Type:      "tool_result",
+							ToolUseID: tr.ToolID,
+							Content:   tr.Result,
+							IsError:   tr.IsError,
+						},
+					},
+				})
+			}
+
+			// Create new assistant message for next turn
+			newAssistantMsg, err := p.createAssistantMessage(processCtx, req)
+			if err != nil {
+				return fmt.Errorf("failed to create assistant message for tool loop: %w", err)
+			}
+			currentMessageID = newAssistantMsg.ID
+
+			// Publish new assistant message created
+			if p.bus != nil {
+				p.bus.Publish(EventMessageCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": currentMessageID,
+					"role":       "assistant",
+					"turn":       "tool_loop",
+				})
+			}
+
+			// Continue loop - will make new streaming request with tool results
+			continue
+		}
+
+		// No more tool calls - processing complete
+		break
+	}
 
 	return nil
 }
@@ -301,10 +380,17 @@ func (p *Processor) buildContentFromParts(parts []database.Part) string {
 	return content
 }
 
-// processStreamEvents handles streaming events from the provider
-func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageID string, events <-chan provider.StreamEvent) {
+// processStreamEventsWithResult handles streaming events and returns results for multi-turn support
+func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID, messageID string, events <-chan provider.StreamEvent) StreamResult {
+	result := StreamResult{
+		StopReason:  "end_turn", // Default
+		ToolResults: []ToolResult{},
+	}
+
 	// Track active parts by index
 	activeParts := make(map[int]*database.Part)
+	// Track tool_use parts that need execution
+	toolUseParts := make(map[int]*database.Part)
 	var mu sync.Mutex
 
 	for event := range events {
@@ -313,14 +399,24 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			p.logger.Info("Processing cancelled", map[string]interface{}{
 				"session_id": sessionID,
 			})
-			return
+			result.IsError = true
+			result.Error = ctx.Err()
+			return result
 		}
 
 		switch e := event.(type) {
+		case provider.MessageStartEvent:
+			// Message started - nothing to do, already created
+
 		case provider.ContentBlockStartEvent:
 			mu.Lock()
 			part := p.createPartFromContentBlock(sessionID, messageID, e)
 			activeParts[e.Index] = part
+
+			// Track tool_use parts for later execution
+			if part.Data.Type == "tool_use" {
+				toolUseParts[e.Index] = part
+			}
 			mu.Unlock()
 
 			// Publish part created event
@@ -380,9 +476,18 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 
 				// If this is a tool_use part, execute the tool
 				if part.Data.Type == "tool_use" {
-					p.executeToolFromPart(ctx, sessionID, messageID, part)
+					toolResult := p.executeToolFromPart(ctx, sessionID, messageID, part)
+					result.ToolResults = append(result.ToolResults, toolResult)
 				}
 			}
+
+		case provider.MessageDeltaEvent:
+			// Track stop reason for multi-turn support
+			result.StopReason = e.Delta.StopReason
+			p.logger.Info("Message delta received", map[string]interface{}{
+				"stop_reason": e.Delta.StopReason,
+				"usage":       e.Usage,
+			})
 
 		case provider.MessageStopEvent:
 			// Mark message complete
@@ -390,6 +495,7 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 				p.bus.Publish(EventMessageComplete, map[string]interface{}{
 					"session_id": sessionID,
 					"message_id": messageID,
+					"stop_reason": result.StopReason,
 				})
 			}
 
@@ -397,6 +503,8 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			p.logger.Error("Stream error", map[string]interface{}{
 				"error": e.Error.Message,
 			})
+			result.IsError = true
+			result.Error = fmt.Errorf("%s: %s", e.Error.Type, e.Error.Message)
 			if p.bus != nil {
 				p.bus.Publish(EventStreamError, map[string]interface{}{
 					"session_id": sessionID,
@@ -407,6 +515,8 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			}
 		}
 	}
+
+	return result
 }
 
 // createPartFromContentBlock creates a Part from a ContentBlockStartEvent
@@ -579,9 +689,14 @@ func (p *Processor) ExecuteTool(ctx context.Context, toolName string, input map[
 }
 
 // executeToolFromPart executes a tool from a tool_use part and creates a tool_result part
-func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageID string, toolUsePart *database.Part) {
+// Returns the ToolResult for multi-turn support
+func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageID string, toolUsePart *database.Part) ToolResult {
 	toolName := toolUsePart.Data.ToolName
 	toolID := toolUsePart.Data.ToolID
+	toolResult := ToolResult{
+		ToolID:   toolID,
+		ToolName: toolName,
+	}
 
 	// Publish tool pending event
 	if p.bus != nil {
@@ -639,6 +754,9 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 		resultPart.Data.ToolResult = err.Error()
 		resultPart.Data.Error = err.Error()
 
+		toolResult.Result = err.Error()
+		toolResult.IsError = true
+
 		p.logger.Error("Tool execution failed", map[string]interface{}{
 			"tool_name": toolName,
 			"error":     err.Error(),
@@ -647,6 +765,9 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 		// Tool execution succeeded
 		resultPart.Data.Status = "complete"
 		resultPart.Data.ToolResult = result.Output
+
+		toolResult.Result = result.Output
+		toolResult.IsError = false
 	}
 
 	// Save tool_result part to database
@@ -680,4 +801,137 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 			"result_part": createdResultPart,
 		})
 	}
+
+	return toolResult
+}
+
+// buildContentMessagesForProvider builds ContentMessages from history and user message
+func (p *Processor) buildContentMessagesForProvider(history []database.Message, userMsg *database.Message, userText string) []provider.ContentMessage {
+	messages := []provider.ContentMessage{}
+
+	// Add history messages
+	for _, h := range history {
+		msg := p.convertDatabaseMessageToContentMessage(h)
+		messages = append(messages, msg)
+	}
+
+	// Add user message
+	if userMsg != nil {
+		// Get parts for user message to extract text (use userText as fallback)
+		parts, err := p.parts.ListByMessage(context.Background(), userMsg.ID)
+		text := userText
+		if err == nil && len(parts) > 0 {
+			for _, part := range parts {
+				if part.Data.Type == "text" {
+					text = part.Data.Text
+					break
+				}
+			}
+		}
+
+		messages = append(messages, provider.ContentMessage{
+			Role: provider.RoleUser,
+			Content: []provider.ContentPart{
+				provider.TextPart{
+					Type: "text",
+					Text: text,
+				},
+			},
+		})
+	}
+
+	return messages
+}
+
+// buildChatRequestWithContentMessages builds ChatRequest with ContentMessages
+func (p *Processor) buildChatRequestWithContentMessages(req ProcessRequest, messages []provider.ContentMessage) provider.ChatRequest {
+	return provider.ChatRequest{
+		Model:           req.Model,
+		ContentMessages:  messages,
+		System:           req.SystemPrompt,
+		MaxTokens:        4096,
+		Tools:            p.GetToolDefinitions(),
+		Stream:           true,
+	}
+}
+
+// buildAssistantContent builds assistant content from message parts
+func (p *Processor) buildAssistantContent(sessionID, messageID string) []provider.ContentPart {
+	// Get parts for this message
+	parts, err := p.parts.ListByMessage(context.Background(), messageID)
+	if err != nil {
+		p.logger.Error("Failed to list parts for assistant content", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return []provider.ContentPart{}
+	}
+
+	content := []provider.ContentPart{}
+	for _, part := range parts {
+		switch part.Data.Type {
+		case "text":
+			content = append(content, provider.TextPart{
+				Type: "text",
+				Text: part.Data.Text,
+			})
+
+		case "tool_use":
+			content = append(content, provider.ToolUsePart{
+				Type:  "tool_use",
+				ID:    part.Data.ToolID,
+				Name:  part.Data.ToolName,
+				Input: part.Data.ToolInput,
+			})
+		}
+	}
+
+	return content
+}
+
+// convertDatabaseMessageToContentMessage converts a database message to ContentMessage format
+func (p *Processor) convertDatabaseMessageToContentMessage(dbMsg database.Message) provider.ContentMessage {
+	msg := provider.ContentMessage{
+		Role: provider.Role(dbMsg.Data.Role),
+	}
+
+	content := []provider.ContentPart{}
+
+	// Get parts from database
+	parts, err := p.parts.ListByMessage(context.Background(), dbMsg.ID)
+	if err == nil && len(parts) > 0 {
+		for _, part := range parts {
+			switch part.Data.Type {
+			case "text":
+				content = append(content, provider.TextPart{
+					Type: "text",
+					Text: part.Data.Text,
+				})
+			case "tool_use":
+				content = append(content, provider.ToolUsePart{
+					Type:  "tool_use",
+					ID:    part.Data.ToolID,
+					Name:  part.Data.ToolName,
+					Input: part.Data.ToolInput,
+				})
+			case "tool_result":
+				content = append(content, provider.ToolResultPart{
+					Type:      "tool_result",
+					ToolUseID: part.Data.ToolID,
+					Content:   part.Data.ToolResult,
+					IsError:   part.Data.Status == "error",
+				})
+			}
+		}
+	}
+
+	// If no parts found, create empty text part for user role
+	if len(content) == 0 && dbMsg.Data.Role == "user" {
+		content = append(content, provider.TextPart{
+			Type: "text",
+			Text: "",
+		})
+	}
+
+	msg.Content = content
+	return msg
 }
