@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
@@ -41,28 +42,56 @@ var (
 
 	// EventStreamError is emitted when an error occurs during streaming
 	EventStreamError = bus.Definition{Type: "session.stream.error"}
+
+	// EventCompactionCreated is emitted when compaction is needed
+	EventCompactionCreated = bus.Definition{Type: "session.compaction.created"}
+
+	// EventBlocked is emitted when processing is blocked (permission denied)
+	EventBlocked = bus.Definition{Type: "session.blocked"}
 )
+
+// StreamResult tracks results from streaming for multi-turn support
+type StreamResult struct {
+	StopReason     string        // "tool_calls", "stop", "length", "unknown" (translated values)
+	ToolResults    []ToolResult  // Tool execution results
+	IsError        bool          // Whether streaming ended with error
+	Error          error         // Error if any
+	NeedsCompaction bool         // Token overflow detected
+	IsBlocked      bool          // Permission denied (blocked state)
+	Tokens         TokenUsage    // Token usage from message
+}
+
+// ToolResult tracks a single tool execution result
+type ToolResult struct {
+	ToolID   string
+	ToolName string
+	Result   string
+	IsError  bool
+	Blocked  bool // Permission denied - waiting for approval
+}
 
 // Processor handles AI message processing with streaming support
 type Processor struct {
-	registry     *provider.ProviderRegistry
-	db           *database.Database
-	bus          *bus.Service
-	messages     *database.MessageStorage
-	parts        *database.PartStorage
-	toolRegistry *tool.Registry // Tool execution registry
-	mu           sync.Mutex
-	active       map[string]context.CancelFunc // Active processing contexts by session ID
-	logger       *log.Logger
+	registry        *provider.ProviderRegistry
+	db              *database.Database
+	bus             *bus.Service
+	messages        *database.MessageStorage
+	parts           *database.PartStorage
+	toolRegistry    *tool.Registry // Tool execution registry
+	compaction      *CompactionService // Token overflow compaction
+	mu              sync.Mutex
+	active          map[string]context.CancelFunc // Active processing contexts by session ID
+	logger          *log.Logger
 }
 
 // ProcessorConfig contains configuration for the processor
 type ProcessorConfig struct {
-	Registry     *provider.ProviderRegistry
-	DB           *database.Database
-	Bus          *bus.Service
-	ToolRegistry *tool.Registry // Tool registry for execution
-	Logger       *log.Logger
+	Registry        *provider.ProviderRegistry
+	DB              *database.Database
+	Bus             *bus.Service
+	ToolRegistry    *tool.Registry // Tool registry for execution
+	CompactionConfig CompactionConfig // Compaction settings
+	Logger          *log.Logger
 }
 
 // NewProcessor creates a new session processor
@@ -75,6 +104,9 @@ func NewProcessor(config ProcessorConfig) *Processor {
 		config.ToolRegistry = tool.NewRegistry()
 	}
 
+	// Initialize compaction service
+	compactionService := NewCompactionService(config.DB, config.Bus, config.CompactionConfig)
+
 	return &Processor{
 		registry:     config.Registry,
 		db:           config.DB,
@@ -82,6 +114,7 @@ func NewProcessor(config ProcessorConfig) *Processor {
 		messages:     database.NewMessageStorage(config.DB),
 		parts:        database.NewPartStorage(config.DB),
 		toolRegistry: config.ToolRegistry,
+		compaction:   compactionService,
 		active:       make(map[string]context.CancelFunc),
 		logger:       config.Logger,
 	}
@@ -100,6 +133,7 @@ type ProcessRequest struct {
 
 // Process streams response from AI, executes tools, stores results
 // This is the main entry point for processing a user message
+// Supports multi-turn tool loops - continues streaming after tool execution
 func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 	p.logger.Info("Processing message", map[string]interface{}{
 		"session_id": req.SessionID,
@@ -137,17 +171,17 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 		})
 	}
 
-	// 2. Build provider request
-	chatReq := p.buildChatRequest(req)
-
-	// 3. Get provider from registry
+	// 2. Get provider from registry
 	providerID, _ := provider.ParseModelID(req.Model)
 	prov, ok := p.registry.Get(providerID)
 	if !ok {
 		return fmt.Errorf("provider not found: %s", providerID)
 	}
 
-	// 4. Create assistant message in DB (for storing parts)
+	// 3. Build initial messages list (user message + history)
+	contentMessages := p.buildContentMessagesForProvider(req.History, userMsg, req.UserMessage)
+
+	// 4. Create initial assistant message in DB
 	assistantMsg, err := p.createAssistantMessage(processCtx, req)
 	if err != nil {
 		return fmt.Errorf("failed to create assistant message: %w", err)
@@ -162,24 +196,237 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 		})
 	}
 
-	// 5. Start streaming
-	events, err := prov.StreamChat(processCtx, chatReq)
-	if err != nil {
-		p.logger.Error("StreamChat failed", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Publish error event
-		if p.bus != nil {
-			p.bus.Publish(EventStreamError, map[string]interface{}{
+	// 5. Multi-turn loop: stream, execute tools, continue if needed
+	// OpenCode pattern: Reload messages from DB each iteration to ensure consistency
+	currentMessageID := assistantMsg.ID
+	maxIterations := 20 // Prevent infinite loops
+	iteration := 0
+
+	// Doom loop detection: track last tool calls
+	lastToolCalls := []ToolResult{}
+	doomLoopThreshold := 3
+
+	for {
+		if iteration >= maxIterations {
+			p.logger.Warn("Max iterations reached, stopping tool loop", map[string]interface{}{
 				"session_id": req.SessionID,
-				"error":      err.Error(),
+				"iterations": iteration,
+			})
+			break
+		}
+
+		// Reload messages from DB on subsequent iterations (OpenCode pattern)
+		// This ensures consistency with DB state after tool execution
+		// Skip messages created by tools or compacted messages
+		if iteration > 0 {
+			// Exclude the current incomplete assistant message (being streamed)
+			// It will be included after streaming completes
+			contentMessages = p.buildContentMessagesFromDB(processCtx, req.SessionID)
+			
+			p.logger.Info("Reloaded messages from DB for iteration", map[string]interface{}{
+				"session_id":    req.SessionID,
+				"iteration":     iteration,
+				"message_count": len(contentMessages),
 			})
 		}
-		return fmt.Errorf("stream failed: %w", err)
-	}
 
-	// 6. Process stream events
-	p.processStreamEvents(processCtx, req.SessionID, assistantMsg.ID, events)
+		// Build chat request for this turn
+		chatReq := p.buildChatRequestWithContentMessages(req, contentMessages)
+
+		// Start streaming
+		events, err := prov.StreamChat(processCtx, chatReq)
+		if err != nil {
+			p.logger.Error("StreamChat failed", map[string]interface{}{
+				"error": err.Error(),
+			})
+			if p.bus != nil {
+				p.bus.Publish(EventStreamError, map[string]interface{}{
+					"session_id": req.SessionID,
+					"error":      err.Error(),
+				})
+			}
+			return fmt.Errorf("stream failed: %w", err)
+		}
+
+		// Process stream events and collect results
+		result := p.processStreamEventsWithResult(processCtx, req.SessionID, currentMessageID, events)
+
+		// Handle error - break out of loop
+		if result.IsError {
+			p.logger.Error("Stream ended with error", map[string]interface{}{
+				"session_id": req.SessionID,
+				"error":      result.Error.Error(),
+			})
+			break
+		}
+
+		// Handle blocked state (permission denied)
+		// OpenCode: processor can return "blocked" when tool permission denied
+		// We wait for user approval before continuing
+		if result.IsBlocked {
+			p.logger.Info("Processing blocked - waiting for permission", map[string]interface{}{
+				"session_id": req.SessionID,
+			})
+			// Publish blocked event for UI to handle
+			if p.bus != nil {
+				p.bus.Publish(EventBlocked, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": currentMessageID,
+					"tool_count": len(result.ToolResults),
+				})
+			}
+			// Don't continue loop - wait for user action
+			break
+		}
+
+		// Handle compaction (token overflow)
+		// OpenCode: When tokens overflow context limit, need to summarize old messages
+		// This creates a summary message and removes old content
+		// Check if we have token usage data and if it exceeds model limits
+		if result.Tokens.Total > 0 && p.compaction != nil {
+			// Get model info from registry
+			modelInfo, ok := p.registry.GetModel(req.Model)
+			if ok && p.compaction.IsOverflow(result.Tokens, modelInfo) {
+				result.NeedsCompaction = true
+			}
+		}
+		
+		if result.NeedsCompaction {
+			p.logger.Warn("Token overflow detected - compaction needed", map[string]interface{}{
+				"session_id": req.SessionID,
+				"tokens":     result.Tokens,
+			})
+			// Publish compaction event - UI can show notification
+			if p.bus != nil {
+				p.bus.Publish(EventCompactionCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"tokens":     result.Tokens.Total,
+				})
+			}
+			// For now, we continue processing but log the warning
+			// Full compaction implementation would summarize old messages here
+		}
+
+		// Check if we need to continue with tool results
+		// Uses translated finish reasons (like OpenAI format):
+		// - "tool_calls" (translated from Anthropic "tool_use")
+		// - "stop" (translated from "end_turn" or "stop_sequence")
+		// - "length" (translated from "max_tokens")
+		// - "unknown" (provider couldn't determine)
+		shouldContinue := false
+
+		// Primary check: finish reason indicates tool calls
+		// OpenCode: !["tool-calls", "unknown"].includes(finish) means should NOT continue
+		// So we continue if finish IS "tool_calls" or "unknown"
+		if result.StopReason == "tool_calls" || result.StopReason == "unknown" {
+			shouldContinue = true
+		}
+
+		// Secondary check: even if stop_reason is "stop" or "end_turn",
+		// if we have tool results, some providers expect us to continue
+		// (OpenCode: "Some providers return 'stop' even when the assistant message contains tool calls")
+		if len(result.ToolResults) > 0 && !shouldContinue {
+			// Check if there are parts that indicate tool use was intended
+			parts, err := p.parts.ListByMessage(ctx, currentMessageID)
+			if err == nil {
+				for _, part := range parts {
+					if part.Data.Type == "tool_use" {
+						shouldContinue = true
+						p.logger.Info("Found tool_use parts despite stop_reason", map[string]interface{}{
+							"session_id":  req.SessionID,
+							"stop_reason": result.StopReason,
+							"tool_name":   part.Data.ToolName,
+						})
+						break
+					}
+				}
+			}
+		}
+
+		if shouldContinue && len(result.ToolResults) > 0 {
+			p.logger.Info("Continuing with tool results", map[string]interface{}{
+				"session_id":   req.SessionID,
+				"tool_count":   len(result.ToolResults),
+				"stop_reason":  result.StopReason,
+				"iteration":    iteration + 1,
+			})
+
+			// Create user message to hold tool results (Anthropic API requirement)
+			// Tool results must be in a user message, not attached to assistant
+			// This message will be picked up when reloading from DB
+			toolResultMsg, err := p.createToolResultUserMessage(processCtx, req.SessionID, result.ToolResults)
+			if err != nil {
+				return fmt.Errorf("failed to create tool result user message: %w", err)
+			}
+
+			p.logger.Info("Created tool result user message", map[string]interface{}{
+				"session_id":   req.SessionID,
+				"message_id":   toolResultMsg.ID,
+				"tool_count":   len(result.ToolResults),
+			})
+
+			// Publish tool result message created event
+			if p.bus != nil {
+				p.bus.Publish(EventMessageCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": toolResultMsg.ID,
+					"role":       "user",
+					"type":       "tool_results",
+				})
+			}
+
+			// Create new assistant message for next turn
+			newAssistantMsg, err := p.createAssistantMessage(processCtx, req)
+			if err != nil {
+				return fmt.Errorf("failed to create assistant message for tool loop: %w", err)
+			}
+			currentMessageID = newAssistantMsg.ID
+
+			// Publish new assistant message created
+			if p.bus != nil {
+				p.bus.Publish(EventMessageCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": currentMessageID,
+					"role":       "assistant",
+					"turn":       "tool_loop",
+					"iteration":  iteration + 1,
+				})
+			}
+
+			// Doom loop detection: check if same tool calls repeated
+			if len(result.ToolResults) >= doomLoopThreshold {
+				isDoomLoop := true
+				for i := 0; i < doomLoopThreshold; i++ {
+					current := result.ToolResults[len(result.ToolResults)-1-i]
+					previous := lastToolCalls[len(lastToolCalls)-1-i]
+					if current.ToolName != previous.ToolName ||
+						current.Result != previous.Result {
+						isDoomLoop = false
+						break
+					}
+				}
+				if isDoomLoop {
+					p.logger.Warn("Doom loop detected - same tool calls repeated", map[string]interface{}{
+						"session_id": req.SessionID,
+						"tool_name":  result.ToolResults[0].ToolName,
+						"iterations": iteration,
+					})
+					// Break out of loop to prevent infinite repetition
+					break
+				}
+			}
+
+			// Track tool calls for doom loop detection
+			lastToolCalls = result.ToolResults
+			iteration++
+
+			// Continue loop - will make new streaming request with tool results
+			continue
+		}
+
+		// No more tool calls - processing complete
+		break
+	}
 
 	return nil
 }
@@ -254,6 +501,66 @@ func (p *Processor) createAssistantMessage(ctx context.Context, req ProcessReque
 	return p.messages.Create(ctx, msg)
 }
 
+// createToolResultUserMessage creates a user message containing tool results
+// This is required for Anthropic API - tool results must be in a user message
+func (p *Processor) createToolResultUserMessage(ctx context.Context, sessionID string, toolResults []ToolResult) (*database.Message, error) {
+	msg := database.Message{
+		SessionID: sessionID,
+		Data: database.MessageInfo{
+			Role: "user",
+			// No agent/model for tool result messages
+		},
+	}
+
+	// Create message in DB
+	createdMsg, err := p.messages.Create(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create tool_result parts for each result
+	for _, tr := range toolResults {
+		part := database.Part{
+			MessageID: createdMsg.ID,
+			SessionID: sessionID,
+			Data: database.PartData{
+				Type:       "tool_result",
+				ToolID:     tr.ToolID,
+				ToolName:   tr.ToolName,
+				ToolResult: tr.Result,
+				Status:     "complete",
+			},
+		}
+
+		if tr.IsError {
+			part.Data.Status = "error"
+			part.Data.Error = tr.Result
+		}
+
+		if tr.Blocked {
+			part.Data.Status = "blocked"
+		}
+
+		_, err := p.parts.Create(ctx, part)
+		if err != nil {
+			p.logger.Error("Failed to create tool_result part", map[string]interface{}{
+				"error":    err.Error(),
+				"tool_id":  tr.ToolID,
+				"tool_name": tr.ToolName,
+			})
+			// Continue creating other parts
+		}
+	}
+
+	p.logger.Info("Created tool result user message with parts", map[string]interface{}{
+		"session_id":  sessionID,
+		"message_id":  createdMsg.ID,
+		"part_count":  len(toolResults),
+	})
+
+	return createdMsg, nil
+}
+
 // buildChatRequest builds a provider chat request from the process request
 func (p *Processor) buildChatRequest(req ProcessRequest) provider.ChatRequest {
 	// Convert history messages to provider format
@@ -301,10 +608,17 @@ func (p *Processor) buildContentFromParts(parts []database.Part) string {
 	return content
 }
 
-// processStreamEvents handles streaming events from the provider
-func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageID string, events <-chan provider.StreamEvent) {
+// processStreamEventsWithResult handles streaming events and returns results for multi-turn support
+func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID, messageID string, events <-chan provider.StreamEvent) StreamResult {
+	result := StreamResult{
+		StopReason:  "end_turn", // Default
+		ToolResults: []ToolResult{},
+	}
+
 	// Track active parts by index
 	activeParts := make(map[int]*database.Part)
+	// Track tool_use parts that need execution
+	toolUseParts := make(map[int]*database.Part)
 	var mu sync.Mutex
 
 	for event := range events {
@@ -313,14 +627,24 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			p.logger.Info("Processing cancelled", map[string]interface{}{
 				"session_id": sessionID,
 			})
-			return
+			result.IsError = true
+			result.Error = ctx.Err()
+			return result
 		}
 
 		switch e := event.(type) {
+		case provider.MessageStartEvent:
+			// Message started - nothing to do, already created
+
 		case provider.ContentBlockStartEvent:
 			mu.Lock()
 			part := p.createPartFromContentBlock(sessionID, messageID, e)
 			activeParts[e.Index] = part
+
+			// Track tool_use parts for later execution
+			if part.Data.Type == "tool_use" {
+				toolUseParts[e.Index] = part
+			}
 			mu.Unlock()
 
 			// Publish part created event
@@ -380,9 +704,33 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 
 				// If this is a tool_use part, execute the tool
 				if part.Data.Type == "tool_use" {
-					p.executeToolFromPart(ctx, sessionID, messageID, part)
+					toolResult := p.executeToolFromPart(ctx, sessionID, messageID, part)
+					result.ToolResults = append(result.ToolResults, toolResult)
+					
+					// If tool was blocked (permission denied), mark result as blocked
+					if toolResult.Blocked {
+						result.IsBlocked = true
+					}
 				}
 			}
+
+		case provider.MessageDeltaEvent:
+			// Track stop reason for multi-turn support
+			result.StopReason = e.Delta.StopReason
+			
+			// Track token usage for compaction detection
+			result.Tokens = TokenUsage{
+				Input:      e.Usage.InputTokens,
+				Output:     e.Usage.OutputTokens,
+				CacheRead:  e.Usage.CacheRead,
+				CacheWrite: e.Usage.CacheWrite,
+				Total:      e.Usage.TotalTokens,
+			}
+			
+			p.logger.Info("Message delta received", map[string]interface{}{
+				"stop_reason": e.Delta.StopReason,
+				"usage":       e.Usage,
+			})
 
 		case provider.MessageStopEvent:
 			// Mark message complete
@@ -390,6 +738,7 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 				p.bus.Publish(EventMessageComplete, map[string]interface{}{
 					"session_id": sessionID,
 					"message_id": messageID,
+					"stop_reason": result.StopReason,
 				})
 			}
 
@@ -397,6 +746,8 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			p.logger.Error("Stream error", map[string]interface{}{
 				"error": e.Error.Message,
 			})
+			result.IsError = true
+			result.Error = fmt.Errorf("%s: %s", e.Error.Type, e.Error.Message)
 			if p.bus != nil {
 				p.bus.Publish(EventStreamError, map[string]interface{}{
 					"session_id": sessionID,
@@ -407,6 +758,8 @@ func (p *Processor) processStreamEvents(ctx context.Context, sessionID, messageI
 			}
 		}
 	}
+
+	return result
 }
 
 // createPartFromContentBlock creates a Part from a ContentBlockStartEvent
@@ -579,9 +932,14 @@ func (p *Processor) ExecuteTool(ctx context.Context, toolName string, input map[
 }
 
 // executeToolFromPart executes a tool from a tool_use part and creates a tool_result part
-func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageID string, toolUsePart *database.Part) {
+// Returns the ToolResult for multi-turn support
+func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageID string, toolUsePart *database.Part) ToolResult {
 	toolName := toolUsePart.Data.ToolName
 	toolID := toolUsePart.Data.ToolID
+	toolResult := ToolResult{
+		ToolID:   toolID,
+		ToolName: toolName,
+	}
 
 	// Publish tool pending event
 	if p.bus != nil {
@@ -619,8 +977,25 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 		})
 	}
 
-	// Execute the tool
-	result, err := p.ExecuteTool(ctx, toolName, input, toolCtx)
+	// Execute the tool with timeout (default 2 minutes per tool)
+	toolTimeout := 2 * time.Minute
+	toolCtxWithTimeout, cancelTool := context.WithTimeout(ctx, toolTimeout)
+	defer cancelTool()
+
+	// Update Abort context for tool execution
+	toolCtx.Abort = toolCtxWithTimeout
+
+	result, err := p.ExecuteTool(toolCtxWithTimeout, toolName, input, toolCtx)
+
+	// Handle timeout specifically
+	if ctx.Err() == context.DeadlineExceeded {
+		p.logger.Warn("Tool execution timed out", map[string]interface{}{
+			"tool_name":  toolName,
+			"timeout":    toolTimeout.String(),
+			"session_id": sessionID,
+		})
+		err = fmt.Errorf("tool execution timed out after %s", toolTimeout.String())
+	}
 
 	// Create tool_result part
 	resultPart := database.Part{
@@ -634,19 +1009,41 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 	}
 
 	if err != nil {
+		// Check if this is a permission denied error (blocked state)
+		var isBlocked bool
+		if toolErr, ok := err.(*tool.ToolError); ok && toolErr.Type == "permission_denied" {
+			isBlocked = true
+			p.logger.Info("Tool execution blocked - permission denied", map[string]interface{}{
+				"tool_name": toolName,
+				"message":   toolErr.Message,
+			})
+		}
+		
 		// Tool execution failed
 		resultPart.Data.Status = "error"
+		if isBlocked {
+			resultPart.Data.Status = "blocked" // Special status for permission denied
+		}
 		resultPart.Data.ToolResult = err.Error()
 		resultPart.Data.Error = err.Error()
 
-		p.logger.Error("Tool execution failed", map[string]interface{}{
-			"tool_name": toolName,
-			"error":     err.Error(),
-		})
+		toolResult.Result = err.Error()
+		toolResult.IsError = true
+		toolResult.Blocked = isBlocked
+
+		if !isBlocked {
+			p.logger.Error("Tool execution failed", map[string]interface{}{
+				"tool_name": toolName,
+				"error":     err.Error(),
+			})
+		}
 	} else {
 		// Tool execution succeeded
 		resultPart.Data.Status = "complete"
 		resultPart.Data.ToolResult = result.Output
+
+		toolResult.Result = result.Output
+		toolResult.IsError = false
 	}
 
 	// Save tool_result part to database
@@ -680,4 +1077,193 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 			"result_part": createdResultPart,
 		})
 	}
+
+	return toolResult
+}
+
+// buildContentMessagesForProvider builds ContentMessages from history and user message
+func (p *Processor) buildContentMessagesForProvider(history []database.Message, userMsg *database.Message, userText string) []provider.ContentMessage {
+	messages := []provider.ContentMessage{}
+
+	// Add history messages
+	for _, h := range history {
+		msg := p.convertDatabaseMessageToContentMessage(h)
+		messages = append(messages, msg)
+	}
+
+	// Add user message
+	if userMsg != nil {
+		// Get parts for user message to extract text (use userText as fallback)
+		parts, err := p.parts.ListByMessage(context.Background(), userMsg.ID)
+		text := userText
+		if err == nil && len(parts) > 0 {
+			for _, part := range parts {
+				if part.Data.Type == "text" {
+					text = part.Data.Text
+					break
+				}
+			}
+		}
+
+		messages = append(messages, provider.ContentMessage{
+			Role: provider.RoleUser,
+			Content: []provider.ContentPart{
+				provider.TextPart{
+					Type: "text",
+					Text: text,
+				},
+			},
+		})
+	}
+
+	return messages
+}
+
+// buildChatRequestWithContentMessages builds ChatRequest with ContentMessages
+func (p *Processor) buildChatRequestWithContentMessages(req ProcessRequest, messages []provider.ContentMessage) provider.ChatRequest {
+	return provider.ChatRequest{
+		Model:           req.Model,
+		ContentMessages:  messages,
+		System:           req.SystemPrompt,
+		MaxTokens:        4096,
+		Tools:            p.GetToolDefinitions(),
+		Stream:           true,
+	}
+}
+
+// buildAssistantContent builds assistant content from message parts
+func (p *Processor) buildAssistantContent(sessionID, messageID string) []provider.ContentPart {
+	// Get parts for this message
+	parts, err := p.parts.ListByMessage(context.Background(), messageID)
+	if err != nil {
+		p.logger.Error("Failed to list parts for assistant content", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return []provider.ContentPart{}
+	}
+
+	content := []provider.ContentPart{}
+	for _, part := range parts {
+		switch part.Data.Type {
+		case "text":
+			content = append(content, provider.TextPart{
+				Type: "text",
+				Text: part.Data.Text,
+			})
+
+		case "tool_use":
+			content = append(content, provider.ToolUsePart{
+				Type:  "tool_use",
+				ID:    part.Data.ToolID,
+				Name:  part.Data.ToolName,
+				Input: part.Data.ToolInput,
+			})
+		}
+	}
+
+	return content
+}
+
+// convertDatabaseMessageToContentMessage converts a database message to ContentMessage format
+// For assistant messages, tool_result parts are skipped (they're for UI display only)
+// For user messages, tool_result parts are included (API expects them in user messages)
+func (p *Processor) convertDatabaseMessageToContentMessage(dbMsg database.Message) provider.ContentMessage {
+	msg := provider.ContentMessage{
+		Role: provider.Role(dbMsg.Data.Role),
+	}
+
+	content := []provider.ContentPart{}
+
+	// Get parts from database
+	parts, err := p.parts.ListByMessage(context.Background(), dbMsg.ID)
+	if err == nil && len(parts) > 0 {
+		for _, part := range parts {
+			switch part.Data.Type {
+			case "text":
+				content = append(content, provider.TextPart{
+					Type: "text",
+					Text: part.Data.Text,
+				})
+			case "tool_use":
+				// Only include tool_use in assistant messages (not in user messages)
+				if dbMsg.Data.Role == "assistant" {
+					content = append(content, provider.ToolUsePart{
+						Type:  "tool_use",
+						ID:    part.Data.ToolID,
+						Name:  part.Data.ToolName,
+						Input: part.Data.ToolInput,
+					})
+				}
+			case "tool_result":
+				// Only include tool_result in user messages (API requirement)
+				// Skip tool_result in assistant messages (they're for UI display only)
+				if dbMsg.Data.Role == "user" {
+					content = append(content, provider.ToolResultPart{
+						Type:      "tool_result",
+						ToolUseID: part.Data.ToolID,
+						Content:   part.Data.ToolResult,
+						IsError:   part.Data.Status == "error",
+					})
+				}
+			}
+		}
+	}
+
+	// If no parts found, create empty text part for user role
+	if len(content) == 0 && dbMsg.Data.Role == "user" {
+		content = append(content, provider.TextPart{
+			Type: "text",
+			Text: "",
+		})
+	}
+
+	msg.Content = content
+	return msg
+}
+
+// buildContentMessagesFromDB reloads messages from database and builds ContentMessages
+// This is called at the start of each iteration to ensure consistency with DB state
+// Matches OpenCode's pattern of reloading messages from DB each iteration
+func (p *Processor) buildContentMessagesFromDB(ctx context.Context, sessionID string, excludeMessageIDs ...string) []provider.ContentMessage {
+	// List all messages for this session
+	dbMessages, err := p.messages.List(ctx, sessionID)
+	if err != nil {
+		p.logger.Error("Failed to list messages from DB", map[string]interface{}{
+			"session_id": sessionID,
+			"error":      err.Error(),
+		})
+		return []provider.ContentMessage{}
+	}
+
+	// Build exclusion set
+	excludeSet := make(map[string]bool)
+	for _, id := range excludeMessageIDs {
+		excludeSet[id] = true
+	}
+
+	messages := []provider.ContentMessage{}
+	for _, dbMsg := range dbMessages {
+		// Skip excluded messages (e.g., current incomplete assistant message)
+		if excludeSet[dbMsg.ID] {
+			continue
+		}
+
+		// Skip compacted messages (if marked)
+		if dbMsg.Data.Compacted {
+			continue
+		}
+
+		// Convert to ContentMessage
+		msg := p.convertDatabaseMessageToContentMessage(dbMsg)
+		messages = append(messages, msg)
+	}
+
+	p.logger.Info("Reloaded messages from DB", map[string]interface{}{
+		"session_id":       sessionID,
+		"message_count":    len(messages),
+		"excluded_count":   len(excludeMessageIDs),
+		"total_db_messages": len(dbMessages),
+	})
+
+	return messages
 }

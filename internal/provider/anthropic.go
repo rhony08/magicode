@@ -214,6 +214,14 @@ type anthropicTextContent struct {
 	Text string `json:"text"`
 }
 
+// anthropicToolUseContent is tool use content
+type anthropicToolUseContent struct {
+	Type  string                 `json:"type"`
+	ID    string                 `json:"id"`
+	Name  string                 `json:"name"`
+	Input map[string]interface{} `json:"input"`
+}
+
 // anthropicToolResultContent is tool result content
 type anthropicToolResultContent struct {
 	Type      string `json:"type"`
@@ -436,13 +444,24 @@ func (p *AnthropicProvider) buildStreamRequestBody(req ChatRequest) (string, err
 		Stream:    true,
 	}
 
-	// Convert messages
-	for _, msg := range req.Messages {
-		content := []anthropicTextContent{{Type: "text", Text: msg.Content}}
-		aReq.Messages = append(aReq.Messages, anthropicMessage{
-			Role:    string(msg.Role),
-			Content: content,
-		})
+	// Convert ContentMessages if present (for multi-turn with tools)
+	if len(req.ContentMessages) > 0 {
+		for _, msg := range req.ContentMessages {
+			content := p.convertContentPartsToAnthropic(msg.Content)
+			aReq.Messages = append(aReq.Messages, anthropicMessage{
+				Role:    string(msg.Role),
+				Content: content,
+			})
+		}
+	} else {
+		// Convert simple Messages
+		for _, msg := range req.Messages {
+			content := []anthropicTextContent{{Type: "text", Text: msg.Content}}
+			aReq.Messages = append(aReq.Messages, anthropicMessage{
+				Role:    string(msg.Role),
+				Content: content,
+			})
+		}
 	}
 
 	// Convert tools
@@ -465,6 +484,39 @@ func (p *AnthropicProvider) buildStreamRequestBody(req ChatRequest) (string, err
 	}
 
 	return string(body), nil
+}
+
+// convertContentPartsToAnthropic converts ContentParts to anthropic content format
+func (p *AnthropicProvider) convertContentPartsToAnthropic(parts []ContentPart) []anthropicContent {
+	content := []anthropicContent{}
+
+	for _, part := range parts {
+		switch cp := part.(type) {
+		case TextPart:
+			content = append(content, anthropicTextContent{
+				Type: "text",
+				Text: cp.Text,
+			})
+
+		case ToolUsePart:
+			content = append(content, anthropicToolUseContent{
+				Type:  "tool_use",
+				ID:    cp.ID,
+				Name:  cp.Name,
+				Input: cp.Input,
+			})
+
+		case ToolResultPart:
+			content = append(content, anthropicToolResultContent{
+				Type:      "tool_result",
+				ToolUseID: cp.ToolUseID,
+				Content:   cp.Content,
+				IsError:   cp.IsError,
+			})
+		}
+	}
+
+	return content
 }
 
 // parseStreamResponse parses SSE stream from Anthropic
@@ -526,6 +578,25 @@ func (p *AnthropicProvider) parseStreamResponse(body io.ReadCloser, events chan 
 	}
 }
 
+// translateAnthropicStopReason converts Anthropic's stop_reason to common format
+// This ensures consistency across all providers (like OpenAI format)
+// Anthropic values: "tool_use", "end_turn", "max_tokens", "stop_sequence"
+// Common values:    "tool_calls", "stop", "length", "stop"
+func translateAnthropicStopReason(reason string) string {
+	switch reason {
+	case "tool_use":
+		return "tool_calls"
+	case "end_turn":
+		return "stop"
+	case "max_tokens":
+		return "length"
+	case "stop_sequence":
+		return "stop"
+	default:
+		return reason // Keep unknown values as-is
+	}
+}
+
 func parseAnthropicEvent(eventType, data string) StreamEvent {
 	switch eventType {
 	case "message_start":
@@ -576,9 +647,26 @@ func parseAnthropicEvent(eventType, data string) StreamEvent {
 			return e
 		}
 	case "message_delta":
-		var e MessageDeltaEvent
-		if err := json.Unmarshal([]byte(data), &e); err == nil {
-			return e
+		var raw struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Usage Usage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &raw); err == nil {
+			// Translate Anthropic stop_reason to common format (like OpenAI)
+			// This ensures consistency across all providers
+			translatedReason := translateAnthropicStopReason(raw.Delta.StopReason)
+			return MessageDeltaEvent{
+				Type: eventType,
+				Delta: struct {
+					StopReason string `json:"stop_reason"`
+				}{
+					StopReason: translatedReason,
+				},
+				Usage: raw.Usage,
+			}
 		}
 	case "message_stop":
 		var e MessageStopEvent

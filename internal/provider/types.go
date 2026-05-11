@@ -104,14 +104,15 @@ type ContentMessage struct {
 
 // ChatRequest represents a chat completion request
 type ChatRequest struct {
-	Model       ModelID          `json:"model"`
-	Messages    []Message        `json:"messages"`
-	System      string           `json:"system,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
-	Stop        []string         `json:"stop,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
+	Model         ModelID          `json:"model"`
+	Messages      []Message        `json:"messages"`       // Simple text messages
+	ContentMessages []ContentMessage `json:"content_messages,omitempty"` // Structured content (for multi-turn with tools)
+	System        string           `json:"system,omitempty"`
+	MaxTokens     int              `json:"max_tokens,omitempty"`
+	Temperature   float64          `json:"temperature,omitempty"`
+	Tools         []ToolDefinition `json:"tools,omitempty"`
+	Stop          []string         `json:"stop,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
 }
 
 // ChatResponse represents a chat completion response
@@ -136,6 +137,10 @@ type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+	
+	// Anthropic-specific cache fields (from API response)
+	CacheRead      int `json:"cache_read_input_tokens,omitempty"`
+	CacheWrite     int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // StreamEvent represents an event in a streaming response
