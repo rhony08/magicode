@@ -42,14 +42,23 @@ var (
 
 	// EventStreamError is emitted when an error occurs during streaming
 	EventStreamError = bus.Definition{Type: "session.stream.error"}
+
+	// EventCompactionCreated is emitted when compaction is needed
+	EventCompactionCreated = bus.Definition{Type: "session.compaction.created"}
+
+	// EventBlocked is emitted when processing is blocked (permission denied)
+	EventBlocked = bus.Definition{Type: "session.blocked"}
 )
 
 // StreamResult tracks results from streaming for multi-turn support
 type StreamResult struct {
-	StopReason   string        // "end_turn", "tool_use", "max_tokens", etc.
-	ToolResults  []ToolResult  // Tool execution results
-	IsError      bool          // Whether streaming ended with error
-	Error        error         // Error if any
+	StopReason     string        // "tool_calls", "stop", "length", "unknown" (translated values)
+	ToolResults    []ToolResult  // Tool execution results
+	IsError        bool          // Whether streaming ended with error
+	Error          error         // Error if any
+	NeedsCompaction bool         // Token overflow detected
+	IsBlocked      bool          // Permission denied (blocked state)
+	Tokens         TokenUsage    // Token usage from message
 }
 
 // ToolResult tracks a single tool execution result
@@ -58,28 +67,31 @@ type ToolResult struct {
 	ToolName string
 	Result   string
 	IsError  bool
+	Blocked  bool // Permission denied - waiting for approval
 }
 
 // Processor handles AI message processing with streaming support
 type Processor struct {
-	registry     *provider.ProviderRegistry
-	db           *database.Database
-	bus          *bus.Service
-	messages     *database.MessageStorage
-	parts        *database.PartStorage
-	toolRegistry *tool.Registry // Tool execution registry
-	mu           sync.Mutex
-	active       map[string]context.CancelFunc // Active processing contexts by session ID
-	logger       *log.Logger
+	registry        *provider.ProviderRegistry
+	db              *database.Database
+	bus             *bus.Service
+	messages        *database.MessageStorage
+	parts           *database.PartStorage
+	toolRegistry    *tool.Registry // Tool execution registry
+	compaction      *CompactionService // Token overflow compaction
+	mu              sync.Mutex
+	active          map[string]context.CancelFunc // Active processing contexts by session ID
+	logger          *log.Logger
 }
 
 // ProcessorConfig contains configuration for the processor
 type ProcessorConfig struct {
-	Registry     *provider.ProviderRegistry
-	DB           *database.Database
-	Bus          *bus.Service
-	ToolRegistry *tool.Registry // Tool registry for execution
-	Logger       *log.Logger
+	Registry        *provider.ProviderRegistry
+	DB              *database.Database
+	Bus             *bus.Service
+	ToolRegistry    *tool.Registry // Tool registry for execution
+	CompactionConfig CompactionConfig // Compaction settings
+	Logger          *log.Logger
 }
 
 // NewProcessor creates a new session processor
@@ -92,6 +104,9 @@ func NewProcessor(config ProcessorConfig) *Processor {
 		config.ToolRegistry = tool.NewRegistry()
 	}
 
+	// Initialize compaction service
+	compactionService := NewCompactionService(config.DB, config.Bus, config.CompactionConfig)
+
 	return &Processor{
 		registry:     config.Registry,
 		db:           config.DB,
@@ -99,6 +114,7 @@ func NewProcessor(config ProcessorConfig) *Processor {
 		messages:     database.NewMessageStorage(config.DB),
 		parts:        database.NewPartStorage(config.DB),
 		toolRegistry: config.ToolRegistry,
+		compaction:   compactionService,
 		active:       make(map[string]context.CancelFunc),
 		logger:       config.Logger,
 	}
@@ -219,12 +235,104 @@ func (p *Processor) Process(ctx context.Context, req ProcessRequest) error {
 		// Process stream events and collect results
 		result := p.processStreamEventsWithResult(processCtx, req.SessionID, currentMessageID, events)
 
+		// Handle error - break out of loop
+		if result.IsError {
+			p.logger.Error("Stream ended with error", map[string]interface{}{
+				"session_id": req.SessionID,
+				"error":      result.Error.Error(),
+			})
+			break
+		}
+
+		// Handle blocked state (permission denied)
+		// OpenCode: processor can return "blocked" when tool permission denied
+		// We wait for user approval before continuing
+		if result.IsBlocked {
+			p.logger.Info("Processing blocked - waiting for permission", map[string]interface{}{
+				"session_id": req.SessionID,
+			})
+			// Publish blocked event for UI to handle
+			if p.bus != nil {
+				p.bus.Publish(EventBlocked, map[string]interface{}{
+					"session_id": req.SessionID,
+					"message_id": currentMessageID,
+					"tool_count": len(result.ToolResults),
+				})
+			}
+			// Don't continue loop - wait for user action
+			break
+		}
+
+		// Handle compaction (token overflow)
+		// OpenCode: When tokens overflow context limit, need to summarize old messages
+		// This creates a summary message and removes old content
+		// Check if we have token usage data and if it exceeds model limits
+		if result.Tokens.Total > 0 && p.compaction != nil {
+			// Get model info from registry
+			modelInfo, ok := p.registry.GetModel(req.Model)
+			if ok && p.compaction.IsOverflow(result.Tokens, modelInfo) {
+				result.NeedsCompaction = true
+			}
+		}
+		
+		if result.NeedsCompaction {
+			p.logger.Warn("Token overflow detected - compaction needed", map[string]interface{}{
+				"session_id": req.SessionID,
+				"tokens":     result.Tokens,
+			})
+			// Publish compaction event - UI can show notification
+			if p.bus != nil {
+				p.bus.Publish(EventCompactionCreated, map[string]interface{}{
+					"session_id": req.SessionID,
+					"tokens":     result.Tokens.Total,
+				})
+			}
+			// For now, we continue processing but log the warning
+			// Full compaction implementation would summarize old messages here
+		}
+
 		// Check if we need to continue with tool results
-		if result.StopReason == "tool_use" && len(result.ToolResults) > 0 {
+		// Uses translated finish reasons (like OpenAI format):
+		// - "tool_calls" (translated from Anthropic "tool_use")
+		// - "stop" (translated from "end_turn" or "stop_sequence")
+		// - "length" (translated from "max_tokens")
+		// - "unknown" (provider couldn't determine)
+		shouldContinue := false
+
+		// Primary check: finish reason indicates tool calls
+		// OpenCode: !["tool-calls", "unknown"].includes(finish) means should NOT continue
+		// So we continue if finish IS "tool_calls" or "unknown"
+		if result.StopReason == "tool_calls" || result.StopReason == "unknown" {
+			shouldContinue = true
+		}
+
+		// Secondary check: even if stop_reason is "stop" or "end_turn",
+		// if we have tool results, some providers expect us to continue
+		// (OpenCode: "Some providers return 'stop' even when the assistant message contains tool calls")
+		if len(result.ToolResults) > 0 && !shouldContinue {
+			// Check if there are parts that indicate tool use was intended
+			parts, err := p.parts.ListByMessage(ctx, currentMessageID)
+			if err == nil {
+				for _, part := range parts {
+					if part.Data.Type == "tool_use" {
+						shouldContinue = true
+						p.logger.Info("Found tool_use parts despite stop_reason", map[string]interface{}{
+							"session_id":  req.SessionID,
+							"stop_reason": result.StopReason,
+							"tool_name":   part.Data.ToolName,
+						})
+						break
+					}
+				}
+			}
+		}
+
+		if shouldContinue && len(result.ToolResults) > 0 {
 			p.logger.Info("Continuing with tool results", map[string]interface{}{
 				"session_id":   req.SessionID,
 				"tool_count":   len(result.ToolResults),
 				"stop_reason":  result.StopReason,
+				"iteration":    iteration + 1,
 			})
 
 			// Build assistant message content from parts
@@ -522,12 +630,27 @@ func (p *Processor) processStreamEventsWithResult(ctx context.Context, sessionID
 				if part.Data.Type == "tool_use" {
 					toolResult := p.executeToolFromPart(ctx, sessionID, messageID, part)
 					result.ToolResults = append(result.ToolResults, toolResult)
+					
+					// If tool was blocked (permission denied), mark result as blocked
+					if toolResult.Blocked {
+						result.IsBlocked = true
+					}
 				}
 			}
 
 		case provider.MessageDeltaEvent:
 			// Track stop reason for multi-turn support
 			result.StopReason = e.Delta.StopReason
+			
+			// Track token usage for compaction detection
+			result.Tokens = TokenUsage{
+				Input:      e.Usage.InputTokens,
+				Output:     e.Usage.OutputTokens,
+				CacheRead:  e.Usage.CacheRead,
+				CacheWrite: e.Usage.CacheWrite,
+				Total:      e.Usage.TotalTokens,
+			}
+			
 			p.logger.Info("Message delta received", map[string]interface{}{
 				"stop_reason": e.Delta.StopReason,
 				"usage":       e.Usage,
@@ -810,18 +933,34 @@ func (p *Processor) executeToolFromPart(ctx context.Context, sessionID, messageI
 	}
 
 	if err != nil {
+		// Check if this is a permission denied error (blocked state)
+		var isBlocked bool
+		if toolErr, ok := err.(*tool.ToolError); ok && toolErr.Type == "permission_denied" {
+			isBlocked = true
+			p.logger.Info("Tool execution blocked - permission denied", map[string]interface{}{
+				"tool_name": toolName,
+				"message":   toolErr.Message,
+			})
+		}
+		
 		// Tool execution failed
 		resultPart.Data.Status = "error"
+		if isBlocked {
+			resultPart.Data.Status = "blocked" // Special status for permission denied
+		}
 		resultPart.Data.ToolResult = err.Error()
 		resultPart.Data.Error = err.Error()
 
 		toolResult.Result = err.Error()
 		toolResult.IsError = true
+		toolResult.Blocked = isBlocked
 
-		p.logger.Error("Tool execution failed", map[string]interface{}{
-			"tool_name": toolName,
-			"error":     err.Error(),
-		})
+		if !isBlocked {
+			p.logger.Error("Tool execution failed", map[string]interface{}{
+				"tool_name": toolName,
+				"error":     err.Error(),
+			})
+		}
 	} else {
 		// Tool execution succeeded
 		resultPart.Data.Status = "complete"

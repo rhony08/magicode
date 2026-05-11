@@ -578,6 +578,25 @@ func (p *AnthropicProvider) parseStreamResponse(body io.ReadCloser, events chan 
 	}
 }
 
+// translateAnthropicStopReason converts Anthropic's stop_reason to common format
+// This ensures consistency across all providers (like OpenAI format)
+// Anthropic values: "tool_use", "end_turn", "max_tokens", "stop_sequence"
+// Common values:    "tool_calls", "stop", "length", "stop"
+func translateAnthropicStopReason(reason string) string {
+	switch reason {
+	case "tool_use":
+		return "tool_calls"
+	case "end_turn":
+		return "stop"
+	case "max_tokens":
+		return "length"
+	case "stop_sequence":
+		return "stop"
+	default:
+		return reason // Keep unknown values as-is
+	}
+}
+
 func parseAnthropicEvent(eventType, data string) StreamEvent {
 	switch eventType {
 	case "message_start":
@@ -628,9 +647,26 @@ func parseAnthropicEvent(eventType, data string) StreamEvent {
 			return e
 		}
 	case "message_delta":
-		var e MessageDeltaEvent
-		if err := json.Unmarshal([]byte(data), &e); err == nil {
-			return e
+		var raw struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Usage Usage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &raw); err == nil {
+			// Translate Anthropic stop_reason to common format (like OpenAI)
+			// This ensures consistency across all providers
+			translatedReason := translateAnthropicStopReason(raw.Delta.StopReason)
+			return MessageDeltaEvent{
+				Type: eventType,
+				Delta: struct {
+					StopReason string `json:"stop_reason"`
+				}{
+					StopReason: translatedReason,
+				},
+				Usage: raw.Usage,
+			}
 		}
 	case "message_stop":
 		var e MessageStopEvent
