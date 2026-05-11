@@ -3,6 +3,7 @@ package session
 
 import (
 	"context"
+	"strings"
 
 	"github.com/rhony08/magicode/internal/bus"
 	"github.com/rhony08/magicode/internal/database"
@@ -207,4 +208,295 @@ Rules:
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, commands, error strings, and identifiers when known.
 - Do not mention the summary process or that context was compacted.`
+}
+
+// CompactionResult represents the result of a compaction operation
+type CompactionResult struct {
+	Continue    bool   // Whether to continue processing
+	Stop        bool   // Whether to stop processing
+	TailStartID string // ID of the message where tail starts
+	Summary     string // Generated summary text
+}
+
+// SelectMessages selects messages to be compacted
+// Returns head (messages to summarize) and tail_start_id (ID where recent messages start)
+func (s *CompactionService) SelectMessages(messages []database.Message, tailTurns int) ([]database.Message, string) {
+	if len(messages) <= 2 {
+		return messages, ""
+	}
+
+	// Find user messages (turn boundaries)
+	turns := []struct {
+		start int
+		id    string
+	}{}
+
+	for i, msg := range messages {
+		if msg.Data.Role == "user" {
+			turns = append(turns, struct {
+				start int
+				id    string
+			}{start: i, id: msg.ID})
+		}
+	}
+
+	if len(turns) <= tailTurns {
+		return messages, ""
+	}
+
+	// Keep the last tailTurns turns as "tail"
+	keepTurn := turns[len(turns)-tailTurns]
+
+	return messages[:keepTurn.start], keepTurn.id
+}
+
+// PruneToolOutputs truncates large tool outputs to free context space
+// Goes backwards through parts until PRUNE_PROTECT tokens worth of tool calls
+func (s *CompactionService) PruneToolOutputs(ctx context.Context, sessionID string) error {
+	if s.db == nil {
+		return nil
+	}
+
+	msgStorage := database.NewMessageStorage(s.db)
+	partStorage := database.NewPartStorage(s.db)
+
+	messages, err := msgStorage.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
+	pruned := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Data.Role != "assistant" {
+			continue
+		}
+
+		parts, err := partStorage.ListByMessage(ctx, msg.ID)
+		if err != nil {
+			continue
+		}
+
+		for j := len(parts) - 1; j >= 0; j-- {
+			part := parts[j]
+			if part.Data.Type == "tool_result" && len(part.Data.ToolResult) > ToolOutputMaxChars {
+				// Truncate tool output
+				part.Data.ToolResult = TruncateToolOutput(part.Data.ToolResult, ToolOutputMaxChars)
+				partStorage.Update(ctx, part)
+				pruned++
+			}
+		}
+
+		// Stop after pruning enough tokens
+		if pruned >= 10 {
+			break
+		}
+	}
+
+	s.logger.Info("Pruned tool outputs", map[string]interface{}{
+		"session_id": sessionID,
+		"pruned":     pruned,
+	})
+
+	return nil
+}
+
+// BuildCompactionPrompt builds the prompt for generating a summary
+func (s *CompactionService) BuildCompactionPrompt(previousSummary string, context []string) string {
+	anchor := ""
+	if previousSummary != "" {
+		anchor = `Update the anchored summary below using the conversation history above.
+Preserve still-true details, remove stale details, and merge in the new facts.
+<previous-summary>
+` + previousSummary + `
+</previous-summary>`
+	} else {
+		anchor = "Create a new anchored summary from the conversation history above."
+	}
+
+	parts := []string{anchor, GetCompactionSummaryPrompt()}
+	parts = append(parts, context...)
+
+	return strings.Join(parts, "\n\n")
+}
+
+// CreateCompactionMessage creates a compaction user message in the database
+// This marks the start of a compacted section
+func (s *CompactionService) CreateCompactionMessage(ctx context.Context, sessionID, tailStartID string, auto bool) (*database.Message, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+
+	msgStorage := database.NewMessageStorage(s.db)
+	partStorage := database.NewPartStorage(s.db)
+
+	// Create user message for compaction marker
+	msg := database.Message{
+		SessionID: sessionID,
+		Data: database.MessageInfo{
+			Role: "user",
+		},
+	}
+
+	createdMsg, err := msgStorage.Create(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create compaction part
+	part := database.Part{
+		MessageID: createdMsg.ID,
+		SessionID: sessionID,
+		Data: database.PartData{
+			Type:            "compaction",
+			CompactionAuto:  auto,
+			CompactionTailID: tailStartID,
+		},
+	}
+
+	_, err = partStorage.Create(ctx, part)
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Info("Created compaction message", map[string]interface{}{
+		"session_id":    sessionID,
+		"message_id":    createdMsg.ID,
+		"tail_start_id": tailStartID,
+		"auto":          auto,
+	})
+
+	return createdMsg, nil
+}
+
+// CreateSummaryMessage creates an assistant message with the summary
+func (s *CompactionService) CreateSummaryMessage(ctx context.Context, sessionID, parentID, summary string) (*database.Message, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+
+	msgStorage := database.NewMessageStorage(s.db)
+	partStorage := database.NewPartStorage(s.db)
+
+	// Create assistant message
+	msg := database.Message{
+		SessionID: sessionID,
+		Data: database.MessageInfo{
+			Role:       "assistant",
+			ParentID:   parentID,
+			Finish:     "stop",
+		},
+	}
+
+	createdMsg, err := msgStorage.Create(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create text part with summary
+	part := database.Part{
+		MessageID: createdMsg.ID,
+		SessionID: sessionID,
+		Data: database.PartData{
+			Type: "text",
+			Text: summary,
+		},
+	}
+
+	_, err = partStorage.Create(ctx, part)
+	if err != nil {
+		return nil, err
+	}
+
+	return createdMsg, nil
+}
+
+// MarkCompacted marks old messages as compacted (excluded from future requests)
+func (s *CompactionService) MarkCompacted(ctx context.Context, sessionID string, upToMessageID string) error {
+	if s.db == nil {
+		return nil
+	}
+
+	msgStorage := database.NewMessageStorage(s.db)
+
+	messages, err := msgStorage.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
+	marked := 0
+	for _, msg := range messages {
+		if msg.ID == upToMessageID {
+			break
+		}
+		msg.Data.Compacted = true
+		msgStorage.Update(ctx, msg)
+		marked++
+	}
+
+	s.logger.Info("Marked messages as compacted", map[string]interface{}{
+		"session_id":     sessionID,
+		"marked_count":   marked,
+		"up_to_message":  upToMessageID,
+	})
+
+	return nil
+}
+
+// GetCompletedCompactions returns completed compaction summaries
+func (s *CompactionService) GetCompletedCompactions(ctx context.Context, sessionID string) ([]string, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+
+	msgStorage := database.NewMessageStorage(s.db)
+	partStorage := database.NewPartStorage(s.db)
+
+	messages, err := msgStorage.List(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := []string{}
+	for _, msg := range messages {
+		if msg.Data.Role != "assistant" {
+			continue
+		}
+
+		parts, err := partStorage.ListByMessage(ctx, msg.ID)
+		if err != nil {
+			continue
+		}
+
+		// Find compaction marker in parent user message
+		for _, part := range parts {
+			if part.Data.Type == "compaction" {
+				// Get the previous assistant message's summary
+				summaries = append(summaries, s.extractSummary(ctx, msg.ID))
+			}
+		}
+	}
+
+	return summaries, nil
+}
+
+// extractSummary extracts summary text from an assistant message
+func (s *CompactionService) extractSummary(ctx context.Context, messageID string) string {
+	if s.db == nil {
+		return ""
+	}
+
+	partStorage := database.NewPartStorage(s.db)
+	parts, err := partStorage.ListByMessage(ctx, messageID)
+	if err != nil {
+		return ""
+	}
+
+	for _, part := range parts {
+		if part.Data.Type == "text" {
+			return part.Data.Text
+		}
+	}
+
+	return ""
 }
